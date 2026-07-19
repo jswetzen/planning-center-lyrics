@@ -97,6 +97,11 @@ fragile for a page that's regenerated once and left up all day. Otherwise
 its flags mirror `update_lyrics.py`'s (`--date`, `--plan-id`,
 `--service-type-id`, `--title-prefix`, `--list-service-types`).
 
+Each song is a native `<details>`/`<summary>` toggle -- collapsed to just
+the title (+ CCLI number) by default, with the browser's built-in
+disclosure arrow to expand it. No JS needed, so the page stays
+self-contained.
+
 You can run it standalone (via a systemd timer / cron job, serving `site/`
 with any static-file web server), or use the containerized setup below,
 which adds the ability to take the site down between services.
@@ -112,9 +117,10 @@ which adds the ability to take the site down between services.
 - **`admin`** -- a small Flask app (`admin_app.py`) with three buttons:
   regenerate the site from Planning Center, open it (copy the generated
   page into `current/`), or close it (replace `current/` with a "come back
-  Sunday" placeholder). It's unauthenticated by design, like
-  `remote_display.py` -- keep its port off the public internet (private
-  network / your own reverse proxy / SSH tunnel).
+  Sunday" placeholder). Gated by HTTP Basic Auth (`ADMIN_USERNAME` /
+  `ADMIN_PASSWORD` -- see `.env.example`; it refuses to start without a
+  password set). Basic Auth isn't encrypted on its own, so still keep this
+  behind TLS (a reverse proxy) rather than exposing it directly.
 
 This exists because song lyrics are CCLI-licensed for the service they're
 used in, not for being publicly readable all week -- **the site defaults to
@@ -122,14 +128,15 @@ closed** (both on first run and on every container restart) until someone
 explicitly opens it from the admin UI.
 
 ```bash
-cp .env.example .env   # same credentials as above
+cp .env.example .env   # fill in Planning Center credentials + ADMIN_PASSWORD
 podman compose up --build -d
 ```
 
-Then visit the admin UI (`http://<host>:9000/`) to regenerate + open the
-site for the service, and close it again afterwards. The generated site
-itself is served at `http://<host>:8080/`; put a reverse proxy in front of
-that port for a real domain + TLS.
+Then visit the admin UI (`http://<host>:9000/`, log in with `ADMIN_USERNAME`
+/ `ADMIN_PASSWORD`) to regenerate + open the site for the service, and close
+it again afterwards. The generated site itself is served at
+`http://<host>:8080/`; put a reverse proxy in front of that port for a real
+domain + TLS.
 
 If your `podman` doesn't bundle a compose provider, install
 [`podman-compose`](https://github.com/containers/podman-compose) instead --

@@ -20,15 +20,18 @@ Layout on the shared data directory (see DATA_DIR):
 Regenerating always refreshes site/index.html; it only touches
 current/index.html (what's actually public) if the site is currently open.
 
-Not authenticated -- like remote_display.py, this is meant to run on a
-private network / behind your own reverse proxy, not exposed directly. See
-the Containerized deployment section of README.md.
+Gated by HTTP Basic Auth (ADMIN_USERNAME / ADMIN_PASSWORD, see
+.env.example) -- it can trigger regeneration and control whether
+copyrighted lyrics are publicly served, so it refuses to start without a
+password set. Basic Auth itself isn't encrypted, so still keep this behind
+TLS (a reverse proxy) rather than exposing it directly. See the
+Containerized deployment section of README.md.
 
 Usage:
     uv run admin_app.py --port 9000
 
-Requires PLANNING_CENTER_APP_ID and PLANNING_CENTER_SECRET in the
-environment (or a .env file), same as generate_static_site.py.
+Requires PLANNING_CENTER_APP_ID, PLANNING_CENTER_SECRET, and ADMIN_PASSWORD
+in the environment (or a .env file).
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import secrets
 import subprocess
 import sys
 from datetime import datetime
@@ -44,14 +48,35 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from flask import Flask, redirect, request, url_for
+from flask import Flask, Response, redirect, request, url_for
 
 log = logging.getLogger("admin_app")
+
+# Loaded at import time (rather than in main(), like the other scripts in
+# this repo) because DATA_DIR/TITLE_PREFIX/ADMIN_* below are module-level
+# constants read by route functions -- they need .env applied before those
+# assignments run, not after.
+load_dotenv()
 
 app = Flask(__name__)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 TITLE_PREFIX = os.environ.get("PAGE_TITLE_PREFIX", "Lovsång Brokyrkan")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+
+
+@app.before_request
+def _require_auth():
+    auth = request.authorization
+    if (
+        not auth
+        or not secrets.compare_digest(auth.username or "", ADMIN_USERNAME)
+        or not secrets.compare_digest(auth.password or "", ADMIN_PASSWORD)
+    ):
+        return Response(
+            "Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="admin"'}
+        )
 
 _PLACEHOLDER_HTML = """<!doctype html>
 <html lang="sv">
@@ -252,11 +277,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         datefmt="%H:%M:%S",
     )
 
-    load_dotenv()
     if not os.environ.get("PLANNING_CENTER_APP_ID") or not os.environ.get("PLANNING_CENTER_SECRET"):
         log.error(
             "Missing credentials. Set PLANNING_CENTER_APP_ID and PLANNING_CENTER_SECRET "
             "in your environment or .env file (see .env.example)."
+        )
+        return 1
+    if not ADMIN_PASSWORD:
+        log.error(
+            "Missing ADMIN_PASSWORD. Set it in your environment or .env file (see .env.example) "
+            "-- this UI controls whether copyrighted lyrics are publicly served, so it refuses "
+            "to start unauthenticated."
         )
         return 1
 

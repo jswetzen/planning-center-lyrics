@@ -75,10 +75,11 @@ _PAGE_TEMPLATE = """<!doctype html>
   }}
   h1 {{ font-size: 1.6rem; margin: 0 0 0.25rem; }}
   .meta {{ color: #777; font-size: 0.9rem; margin: 0 0 2rem; }}
-  h2 {{ font-size: 1.25rem; margin: 2rem 0 0.25rem; }}
-  .ccli {{ font-style: italic; color: #777; font-size: 0.9rem; margin: 0 0 0.75rem; }}
-  pre {{ white-space: pre-wrap; font-family: inherit; font-size: 1rem; margin: 0; }}
-  hr {{ margin: 2rem 0; border: none; border-top: 1px solid #ddd; }}
+  details {{ margin: 1.25rem 0; }}
+  summary {{ font-size: 1.25rem; cursor: pointer; padding: 0.15rem 0; }}
+  .ccli {{ font-style: italic; color: #777; font-size: 0.85rem; font-weight: normal; }}
+  pre {{ white-space: pre-wrap; font-family: inherit; font-size: 1rem; margin: 0.75rem 0 0; }}
+  hr {{ margin: 1.25rem 0; border: none; border-top: 1px solid #ddd; }}
 </style>
 </head>
 <body>
@@ -105,10 +106,15 @@ def format_html(
     else:
         sections = []
         for song in songs:
-            lines = [f"<h2>{escape(song.title)}</h2>"]
+            summary = escape(song.title)
             if song.ccli_number:
-                lines.append(f'<p class="ccli">CCLI #{escape(str(song.ccli_number))}</p>')
-            lines.append(f"<pre>{escape(song.body(include_chords))}</pre>")
+                summary += f' <span class="ccli">CCLI #{escape(str(song.ccli_number))}</span>'
+            lines = [
+                "<details>",
+                f"<summary>{summary}</summary>",
+                f"<pre>{escape(song.body(include_chords))}</pre>",
+                "</details>",
+            ]
             sections.append("\n".join(lines))
         body = "\n<hr>\n".join(sections)
 

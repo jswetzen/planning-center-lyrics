@@ -97,11 +97,36 @@ fragile for a page that's regenerated once and left up all day. Otherwise
 its flags mirror `update_lyrics.py`'s (`--date`, `--plan-id`,
 `--service-type-id`, `--title-prefix`, `--list-service-types`).
 
-In production this runs nightly on its own small server (see
-`../mikro-iac/apps/texter.nix`), serving the generated `site/` directory at
-`texter.brokyrkan.nu` through a static-file container. The site is public
-(no login) and regenerates from scratch every night, so there's nothing to
-back up -- if the CT is ever rebuilt, the next nightly run repopulates it.
+In production this runs nightly (via a systemd timer / cron job calling `uv
+run generate_static_site.py`) on its own small server, serving the generated
+`site/` directory through a static-file web server. The site is public (no
+login) and regenerates from scratch every night, so there's nothing to back
+up -- if the host is ever rebuilt, the next nightly run repopulates it.
+
+## Live remote + wall display
+
+`remote_display.py` is a third sibling script: a small local Flask app that
+lets a worship leader flip through a plan's songs from one device (phone/
+tablet) while a second device (e.g. a wall projector's browser) shows the
+current song's lyrics full-screen.
+
+```bash
+uv run remote_display.py                       # nearest upcoming plan
+uv run remote_display.py --date 2024-08-04
+uv run remote_display.py --plan-id 12345 --service-type-id 6789
+uv run remote_display.py --port 8000
+```
+
+It prints two URLs to visit from devices on the same local network:
+
+- `/remote` -- the leader's controller (Prev/Next buttons, tap-to-jump list)
+- `/display` -- the wall-facing display (large centered lyrics, no chords)
+
+Both pages poll a small JSON endpoint every couple of seconds; there's no
+websocket/push machinery, no database, and no dependency on Planning Center
+Music Stand's own internal "Sessions" feature -- just the documented public
+Planning Center API. State lives in memory only and resets when the process
+restarts.
 
 ## Notes / things to double-check
 
@@ -120,3 +145,13 @@ back up -- if the CT is ever rebuilt, the next nightly run repopulates it.
   the whole run.
 - Generated `.md` exports and `.env` are gitignored since they contain
   copyrighted lyrics / secrets -- don't commit them.
+- **Song lyrics are copyrighted.** This tool only reproduces lyrics your
+  Planning Center account already has access to, but *displaying or
+  distributing* them (Notion page, wall projector, public static site, etc.)
+  is your responsibility to license, typically via a
+  [CCLI](https://us.ccli.com/) license -- hence why each song's CCLI number
+  is included in the output.
+
+## License
+
+MIT -- see [LICENSE](LICENSE).

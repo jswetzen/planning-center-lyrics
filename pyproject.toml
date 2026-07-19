@@ -1,7 +1,9 @@
 [project]
 name = "planning-center-songs"
 version = "0.1.0"
-description = "Add your description here"
+description = "Export song lyrics from a Planning Center Services plan to Markdown, a static HTML page, or a live remote/wall display."
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3.1.3",

@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+
+# Generated lyric exports (contain copyrighted song lyrics - don't commit)
+*.md
+!README.md
+site/
+
+# Debug artifacts from reverse-engineering the Music Stand app's API traffic -- not project files
+*.pcap
+*.apkm

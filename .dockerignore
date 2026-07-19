@@ -1,0 +1,11 @@
+.git
+.venv
+.claude
+__pycache__/
+*.py[oc]
+*.md
+!README.md
+site/
+*.pcap
+*.apkm
+.env

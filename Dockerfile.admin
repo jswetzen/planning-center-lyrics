@@ -1,0 +1,30 @@
+# Admin UI: regenerates the static lyrics site from Planning Center and
+# toggles it open/closed. See README.md's "Containerized deployment" section.
+
+FROM docker.io/library/python:3.12-alpine AS builder
+
+# gcc/musl-dev cover any dependency without a prebuilt musllinux wheel;
+# they don't end up in the final image.
+RUN apk add --no-cache gcc musl-dev
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+COPY pco_client.py generate_static_site.py admin_app.py ./
+RUN uv sync --frozen --no-dev
+
+FROM docker.io/library/python:3.12-alpine
+
+WORKDIR /app
+COPY --from=builder /app /app
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Runs as root: it's an unauthenticated internal tool by design (see
+# admin_app.py's docstring) and this keeps it simple to write into a
+# podman named volume, which isn't pre-owned by any particular uid.
+VOLUME /data
+
+EXPOSE 9000
+ENTRYPOINT ["python", "admin_app.py"]
+CMD ["--host", "0.0.0.0", "--port", "9000"]

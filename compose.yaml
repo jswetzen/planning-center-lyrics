@@ -1,0 +1,35 @@
+# Two-container deployment: `admin` regenerates the site from Planning
+# Center and toggles it open/closed; `web` just serves whatever `admin`
+# last wrote. See README.md's "Containerized deployment" section.
+#
+# Usage (rootless podman):
+#   podman compose up --build -d
+#   # or, if your podman doesn't bundle compose: podman-compose up --build -d
+
+services:
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+    env_file:
+      - .env
+    volumes:
+      - site-data:/data
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    volumes:
+      - site-data:/data:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - admin
+    restart: unless-stopped
+
+volumes:
+  site-data:

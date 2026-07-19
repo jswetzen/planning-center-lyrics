@@ -97,11 +97,47 @@ fragile for a page that's regenerated once and left up all day. Otherwise
 its flags mirror `update_lyrics.py`'s (`--date`, `--plan-id`,
 `--service-type-id`, `--title-prefix`, `--list-service-types`).
 
-In production this runs nightly (via a systemd timer / cron job calling `uv
-run generate_static_site.py`) on its own small server, serving the generated
-`site/` directory through a static-file web server. The site is public (no
-login) and regenerates from scratch every night, so there's nothing to back
-up -- if the host is ever rebuilt, the next nightly run repopulates it.
+You can run it standalone (via a systemd timer / cron job, serving `site/`
+with any static-file web server), or use the containerized setup below,
+which adds the ability to take the site down between services.
+
+## Containerized deployment (podman)
+
+`Dockerfile.admin` + `Dockerfile.web` + `compose.yaml` package
+`generate_static_site.py` as two containers sharing a volume:
+
+- **`web`** -- a plain nginx:alpine container that serves whatever's in the
+  shared volume's `current/index.html`. This is what's actually reachable
+  from the internet (e.g. as texter.brokyrkan.nu).
+- **`admin`** -- a small Flask app (`admin_app.py`) with three buttons:
+  regenerate the site from Planning Center, open it (copy the generated
+  page into `current/`), or close it (replace `current/` with a "come back
+  Sunday" placeholder). It's unauthenticated by design, like
+  `remote_display.py` -- keep its port off the public internet (private
+  network / your own reverse proxy / SSH tunnel).
+
+This exists because song lyrics are CCLI-licensed for the service they're
+used in, not for being publicly readable all week -- **the site defaults to
+closed** (both on first run and on every container restart) until someone
+explicitly opens it from the admin UI.
+
+```bash
+cp .env.example .env   # same credentials as above
+podman compose up --build -d
+```
+
+Then visit the admin UI (`http://<host>:9000/`) to regenerate + open the
+site for the service, and close it again afterwards. The generated site
+itself is served at `http://<host>:8080/`; put a reverse proxy in front of
+that port for a real domain + TLS.
+
+If your `podman` doesn't bundle a compose provider, install
+[`podman-compose`](https://github.com/containers/podman-compose) instead --
+`podman compose` transparently shells out to it.
+
+There's no scheduling here yet (regenerating and opening/closing are both
+manual) -- see the module docstring in `admin_app.py` if you want to extend
+it.
 
 ## Live remote + wall display
 

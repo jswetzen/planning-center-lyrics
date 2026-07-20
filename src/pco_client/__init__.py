@@ -9,7 +9,7 @@ static-site/generate_static_site.py, and experimental/remote_display.py.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
 
 import requests
@@ -213,6 +213,21 @@ def get_plan_items(session: requests.Session, service_type_id: str, plan_id: str
         f"/service_types/{service_type_id}/plans/{plan_id}/items",
         order="sequence",
     )
+
+
+def get_plan_times(session: requests.Session, service_type_id: str, plan_id: str) -> list[dict]:
+    """Return a plan's scheduled time blocks (start/end, name, time_type).
+
+    Separate from sort_date/dates (which only carry a calendar date, not a
+    time) -- this is the actual scheduled start/end used by the scheduler to
+    decide when to auto-open/close. Not used by the lyrics-export scripts.
+    """
+    return api_get_all_pages(session, f"/service_types/{service_type_id}/plans/{plan_id}/plan_times")
+
+
+def parse_pco_datetime(value: str) -> datetime:
+    """Parse a Planning Center API timestamp (UTC, 'Z' suffix) into an aware datetime."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def get_song(session: requests.Session, song_id: str) -> dict:

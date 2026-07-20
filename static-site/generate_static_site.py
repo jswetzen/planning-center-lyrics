@@ -31,6 +31,7 @@ environment (or a .env file). See README.md for how to create these.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -50,6 +51,7 @@ from pco_client import (
     find_upcoming_plan,
     get_plan_by_id,
     list_service_types,
+    parse_pco_datetime,
 )
 
 log = logging.getLogger("generate_static_site")
@@ -211,11 +213,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         plan_id = plan["id"]
         sort_date_raw = plan["attributes"].get("sort_date") or plan["attributes"].get("dates")
-        plan_date = (
-            datetime.fromisoformat(sort_date_raw.replace("Z", "+00:00")).date()
-            if sort_date_raw
-            else date.today()
-        )
+        plan_date = parse_pco_datetime(sort_date_raw).date() if sort_date_raw else date.today()
         log.info(
             "Using plan %r (id=%s, service_type=%s, date=%s)",
             plan["attributes"].get("title") or plan["attributes"].get("series_title"),
@@ -232,6 +230,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(html, encoding="utf-8")
+
+        # Sidecar recording which exact plan this run fetched -- admin_app.py
+        # reads it to know what it just regenerated, whether that was via an
+        # explicit --plan-id (automation) or "nearest upcoming" (manual
+        # default), so it can e.g. refresh the *same* plan on a manual
+        # "Regenerate now" click while a service is live.
+        plan_title = plan["attributes"].get("title") or plan["attributes"].get("series_title") or f"Plan {plan_id}"
+        plan_info = {
+            "service_type_id": service_type_id,
+            "plan_id": plan_id,
+            "plan_title": plan_title,
+            "plan_date": plan_date.isoformat(),
+        }
+        output_path.with_suffix(".plan.json").write_text(json.dumps(plan_info), encoding="utf-8")
 
         print(f"\n✅ Wrote {len(songs)} song(s) to {output_path}.")
         return 0

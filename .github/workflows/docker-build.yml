@@ -1,0 +1,29 @@
+name: Docker build
+
+# Build-only check: confirms both container images still build after a
+# change to the Dockerfiles, pyproject.toml/uv.lock, or src/. Neither image
+# is pushed anywhere -- there's no registry configured for this project (see
+# static-site/compose.yaml, which builds locally via podman/docker compose).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [admin, web]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: static-site/Dockerfile.${{ matrix.image }}
+          push: false

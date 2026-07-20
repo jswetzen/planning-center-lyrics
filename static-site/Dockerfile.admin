@@ -12,11 +12,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 # LICENSE/README.md are needed too: pyproject.toml points at them and
-# hatchling validates they exist when building/installing the project below.
+# uv_build validates they exist when building/installing the project below.
 COPY LICENSE README.md ./
 COPY src/ src/
 RUN uv sync --frozen --no-dev
-COPY static-site/generate_static_site.py static-site/admin_app.py ./
+COPY static-site/generate_static_site.py static-site/admin_app.py static-site/scheduler.py ./
 
 FROM docker.io/library/python:3.12-alpine
 

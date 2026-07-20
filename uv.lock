@@ -215,7 +215,7 @@ wheels = [
 [[package]]
 name = "planning-center-songs"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "flask" },
     { name = "python-dotenv" },

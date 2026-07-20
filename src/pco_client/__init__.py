@@ -1,9 +1,9 @@
 """
-pco_client.py
+pco_client
 
 Shared Planning Center Services API client: authentication, plan/song/
-arrangement lookups, and lyrics assembly. Used by both update_lyrics.py
-(Notion Markdown export) and remote_display.py (live wall display).
+arrangement lookups, and lyrics assembly. Used by notion-export/update_lyrics.py,
+static-site/generate_static_site.py, and experimental/remote_display.py.
 """
 
 from __future__ import annotations

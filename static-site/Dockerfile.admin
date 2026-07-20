@@ -11,8 +11,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
-COPY pco_client.py generate_static_site.py admin_app.py ./
+# LICENSE/README.md are needed too: pyproject.toml points at them and
+# hatchling validates they exist when building/installing the project below.
+COPY LICENSE README.md ./
+COPY src/ src/
 RUN uv sync --frozen --no-dev
+COPY static-site/generate_static_site.py static-site/admin_app.py ./
 
 FROM docker.io/library/python:3.12-alpine
 
@@ -20,9 +24,9 @@ WORKDIR /app
 COPY --from=builder /app /app
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Runs as root: it's an unauthenticated internal tool by design (see
-# admin_app.py's docstring) and this keeps it simple to write into a
-# podman named volume, which isn't pre-owned by any particular uid.
+# Runs as root: this keeps it simple to write into a podman named volume,
+# which isn't pre-owned by any particular uid. It's still gated by HTTP
+# Basic Auth at the application layer (see admin_app.py's docstring).
 VOLUME /data
 
 EXPOSE 9000

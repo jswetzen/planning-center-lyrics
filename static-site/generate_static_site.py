@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """
-update_lyrics.py
+generate_static_site.py
 
-Fetch the songs (and their lyrics/chords) from a Planning Center Services
-plan and write them out as a single Notion-ready Markdown file.
+Fetch the songs (and lyrics) from a Planning Center Services plan and write
+them out as a single self-contained static HTML page -- meant to be served
+as-is by a plain static file server (no build step, no external assets/CDN,
+no JavaScript) and regenerated on a schedule (e.g. a nightly cron/systemd
+timer) so the page always reflects the nearest upcoming plan.
 
-Notion auto-converts pasted Markdown into blocks (headings, paragraphs,
-links, and <details>/<summary> HTML into collapsible toggles), so the
-intended workflow is:
+This is a sibling of notion-export/update_lyrics.py (which produces a Notion-ready
+Markdown file for a manual copy/paste workflow) -- use this one instead when
+you want the plan's songs reachable directly at a URL.
 
-    1. Run this script to generate a .md file for a plan.
-    2. Open/create the page in Notion.
-    3. Paste the file's contents into the page.
-
-No Notion API calls are made -- upload is manual by design.
+PDF chord-chart links are intentionally never included here: they're
+short-lived signed URLs (see pco_client.get_arrangement_pdf_url), and a page
+that's regenerated once and then left up all day is exactly the case where
+they're likely to go stale before anyone clicks them.
 
 Usage:
-    uv run update_lyrics.py                       # nearest upcoming plan
-    uv run update_lyrics.py --date 2024-08-04      # plan on a specific date
-    uv run update_lyrics.py --plan-id 12345 --service-type-id 6789
-    uv run update_lyrics.py --include-chords -o lovsang.md
-    uv run update_lyrics.py --list-service-types
+    uv run static-site/generate_static_site.py                       # nearest upcoming plan
+    uv run static-site/generate_static_site.py --date 2024-08-04
+    uv run static-site/generate_static_site.py --plan-id 12345 --service-type-id 6789
+    uv run static-site/generate_static_site.py --include-chords -o site/index.html
+    uv run static-site/generate_static_site.py --list-service-types
 
 Requires PLANNING_CENTER_APP_ID and PLANNING_CENTER_SECRET in the
 environment (or a .env file). See README.md for how to create these.
@@ -33,6 +35,8 @@ import logging
 import os
 import sys
 from datetime import date, datetime
+from html import escape
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -45,58 +49,76 @@ from pco_client import (
     find_plan_by_date,
     find_upcoming_plan,
     get_plan_by_id,
-    get_plan_songbook_url,
     list_service_types,
 )
 
-log = logging.getLogger("update_lyrics")
+log = logging.getLogger("generate_static_site")
+
+_PAGE_TEMPLATE = """<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<title>{page_title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{
+    margin: 0 auto; max-width: 42em; padding: 2rem 1.25rem 4rem;
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.5; color: #1a1a1a; background: #fff;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ color: #eee; background: #111; }}
+    .ccli {{ color: #999; }}
+    .meta {{ color: #999; }}
+    hr {{ border-top-color: #333; }}
+  }}
+  h1 {{ font-size: 1.6rem; margin: 0 0 0.25rem; }}
+  .meta {{ color: #777; font-size: 0.9rem; margin: 0 0 2rem; }}
+  details {{ margin: 1.25rem 0; }}
+  summary {{ font-size: 1.25rem; cursor: pointer; padding: 0.15rem 0; }}
+  .ccli {{ font-style: italic; color: #777; font-size: 0.85rem; font-weight: normal; }}
+  pre {{ white-space: pre-wrap; font-family: inherit; font-size: 1rem; margin: 0.75rem 0 0; }}
+  hr {{ margin: 1.25rem 0; border: none; border-top: 1px solid #ddd; }}
+</style>
+</head>
+<body>
+<h1>{page_title}</h1>
+<p class="meta">Uppdaterad {generated_at}</p>
+{body}
+</body>
+</html>
+"""
 
 
-# --------------------------------------------------------------------------
-# Formatting
-# --------------------------------------------------------------------------
-
-
-def format_markdown(
+def format_html(
     title_prefix: str,
     plan_date: date,
     songs: list[SongLyrics],
     include_chords: bool,
-    songbook_url: Optional[str] = None,
 ) -> str:
-    """Build the full Notion-ready Markdown document."""
+    """Build the full static HTML page."""
     page_title = f"{title_prefix} - {plan_date.isoformat()}"
-    parts = [f"# {page_title}", ""]
-
-    if songbook_url:
-        parts.append(f"[📄 Songbook PDF]({songbook_url})")
-        parts.append("")
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if not songs:
-        parts.append("_No songs found on this plan._")
-        return "\n".join(parts)
+        body = "<p><em>Inga sånger hittades i denna plan.</em></p>"
+    else:
+        sections = []
+        for song in songs:
+            summary = escape(song.title)
+            if song.ccli_number:
+                summary += f' <span class="ccli">CCLI #{escape(str(song.ccli_number))}</span>'
+            lines = [
+                "<details>",
+                f"<summary>{summary}</summary>",
+                f"<pre>{escape(song.body(include_chords))}</pre>",
+                "</details>",
+            ]
+            sections.append("\n".join(lines))
+        body = "\n<hr>\n".join(sections)
 
-    for song in songs:
-        summary = song.title
-        if song.ccli_number:
-            summary += f" (CCLI #{song.ccli_number})"
-        # Notion recognizes this exact <details>/<summary> HTML pattern on
-        # paste and converts it into a native, collapsed toggle block -- it's
-        # the same markup Notion itself produces when you export a toggle.
-        # The blank lines around the body are required for the lyrics to be
-        # parsed as block content nested inside the toggle.
-        parts.append("<details>")
-        parts.append(f"<summary>{summary}</summary>")
-        parts.append("")
-        if song.pdf_url:
-            parts.append(f"[📄 Open PDF chart]({song.pdf_url})")
-            parts.append("")
-        parts.append(song.body(include_chords))
-        parts.append("")
-        parts.append("</details>")
-        parts.append("")
-
-    return "\n".join(parts).strip() + "\n"
+    return _PAGE_TEMPLATE.format(page_title=escape(page_title), generated_at=generated_at, body=body)
 
 
 # --------------------------------------------------------------------------
@@ -106,7 +128,7 @@ def format_markdown(
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export song lyrics from a Planning Center Services plan to Markdown."
+        description="Generate a static HTML page of song lyrics from a Planning Center Services plan."
     )
     plan_selector = parser.add_mutually_exclusive_group()
     plan_selector.add_argument(
@@ -128,16 +150,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Include the chord chart instead of plain lyrics, where available.",
     )
     parser.add_argument(
-        "--no-pdf-links",
-        action="store_true",
-        help="Skip fetching per-song/songbook PDF chart links (fewer API calls, faster).",
-    )
-    parser.add_argument(
         "-o",
         "--output",
         type=str,
-        default=None,
-        help="Output .md file path. Defaults to '<title-prefix> - <date>.md'.",
+        default="site/index.html",
+        help="Output .html file path. Defaults to 'site/index.html'.",
     )
     parser.add_argument(
         "--title-prefix",
@@ -207,30 +224,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             plan_date,
         )
 
-        include_pdf_links = not args.no_pdf_links
-        songs = collect_songs(session, service_type_id, plan_id, include_pdf_links=include_pdf_links)
+        songs = collect_songs(session, service_type_id, plan_id, include_pdf_links=False)
         log.info("Found %d song(s).", len(songs))
 
-        songbook_url = (
-            get_plan_songbook_url(session, service_type_id, plan_id) if include_pdf_links else None
-        )
-        if songbook_url:
-            log.info("Found a combined songbook PDF attached to the plan.")
+        html = format_html(args.title_prefix, plan_date, songs, args.include_chords)
 
-        markdown = format_markdown(
-            args.title_prefix, plan_date, songs, args.include_chords, songbook_url=songbook_url
-        )
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(html, encoding="utf-8")
 
-        output_path = args.output or f"{args.title_prefix} - {plan_date.isoformat()}.md"
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(markdown)
-
-        print(f"\n✅ Wrote {len(songs)} song(s) to {output_path!r}.")
-        print("   Open the page in Notion and paste the file's contents in --")
-        print("   Notion converts the Markdown headings/toggles/links into blocks automatically.")
-        if include_pdf_links:
-            print("   Note: PDF chart links are time-limited signed URLs -- paste soon, or")
-            print("   re-run the script to refresh them if a link has gone stale.")
+        print(f"\n✅ Wrote {len(songs)} song(s) to {output_path}.")
         return 0
 
     except PlanningCenterError as exc:

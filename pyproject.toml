@@ -10,3 +10,15 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
 ]
+
+# `pco_client` (src/pco_client/) is the only real package here -- everything
+# else is standalone scripts in notion-export/, static-site/, and
+# experimental/ that import it as `from pco_client import ...`. Installing
+# it via `uv sync` (editable, into .venv) is what makes that import resolve
+# regardless of which subfolder the script runs from.
+[build-system]
+requires = ["uv_build>=0.9.11,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pco_client"

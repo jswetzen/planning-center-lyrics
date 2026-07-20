@@ -15,6 +15,7 @@ wheels/
 # Generated lyric exports (contain copyrighted song lyrics - don't commit)
 *.md
 !README.md
+!QUICKSTART.md
 site/
 
 # Debug artifacts from reverse-engineering the Music Stand app's API traffic -- not project files

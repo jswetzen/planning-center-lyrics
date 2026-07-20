@@ -2,17 +2,20 @@
 # Center and toggles it open/closed; `web` just serves whatever `admin`
 # last wrote. See README.md's "Containerized deployment" section.
 #
-# Usage (rootless podman):
+# Build context is the repo root (".."), not this directory -- both
+# Dockerfiles need pyproject.toml/uv.lock/src/ from up there.
+#
+# Usage (rootless podman, from this directory):
 #   podman compose up --build -d
 #   # or, if your podman doesn't bundle compose: podman-compose up --build -d
 
 services:
   admin:
     build:
-      context: .
-      dockerfile: Dockerfile.admin
+      context: ..
+      dockerfile: static-site/Dockerfile.admin
     env_file:
-      - .env
+      - ../.env
     volumes:
       - site-data:/data
     ports:
@@ -21,8 +24,8 @@ services:
 
   web:
     build:
-      context: .
-      dockerfile: Dockerfile.web
+      context: ..
+      dockerfile: static-site/Dockerfile.web
     volumes:
       - site-data:/data:ro
     ports:

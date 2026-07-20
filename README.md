@@ -1,13 +1,24 @@
 # planning-center-songs
 
-Exports the song list + lyrics from a Planning Center Services plan into a
-single Markdown file, formatted so you can paste it straight into a Notion
-page (Notion auto-converts pasted Markdown headings/dividers into blocks).
+Pulls the song list + lyrics out of a Planning Center Services plan. The
+main thing here is a **self-hosted static lyrics site with a containerized
+admin/web deployment** (`static-site/`); a Notion-export script
+(`notion-export/`) and an untested live remote/wall-display proof of concept
+(`experimental/`) are also included.
 
-There's no Notion API integration here on purpose -- upload is a manual
-copy/paste step.
+In a hurry? See [QUICKSTART.md](QUICKSTART.md) to get the containerized site
+running. This file has the full picture, including the other two tools.
 
-## Setup
+## Repo layout
+
+```
+src/pco_client/       Shared Planning Center API client (used by everything below)
+static-site/          Main feature: static HTML site + admin/web containers + compose
+notion-export/        Notion-ready Markdown export (the original script)
+experimental/         Live remote/wall display -- untested proof of concept
+```
+
+## Setup (all tools)
 
 This project uses [uv](https://docs.astral.sh/uv/).
 
@@ -40,61 +51,25 @@ PLANNING_CENTER_SECRET=...
 ```
 
 `PLANNING_CENTER_SERVICE_TYPE_ID` and `PAGE_TITLE_PREFIX` are optional --
-see comments in `.env.example`. Run `uv run update_lyrics.py
+see comments in `.env.example`. Run `uv run static-site/generate_static_site.py
 --list-service-types` to find a service type's id if you want to pin one.
+`.env` lives at the repo root and is shared by all three tools below.
 
-## Usage
+## Self-hosted static site (main feature)
 
-```bash
-# Nearest upcoming plan, plain lyrics only
-uv run update_lyrics.py
-
-# A specific date
-uv run update_lyrics.py --date 2024-08-04
-
-# A specific plan by id (skips date lookup)
-uv run update_lyrics.py --plan-id 12345 --service-type-id 6789
-
-# Include chord charts instead of plain lyrics, custom output path
-uv run update_lyrics.py --include-chords -o lovsang.md
-
-# List service types (to find --service-type-id)
-uv run update_lyrics.py --list-service-types
-
-# Verbose logging for troubleshooting
-uv run update_lyrics.py -v
-```
-
-Output is a Markdown file named `<PAGE_TITLE_PREFIX> - <date>.md` by default
-(e.g. `Lovsång Brokyrkan - 2024-08-04.md`), with:
-
-- `# <prefix> - <date>` as the page title
-- `## <song title>` for each song
-- the song's CCLI number (if present) in italics
-- the lyrics (or chord chart, with `--include-chords`) below it
-- a `---` divider between songs
-
-### Pasting into Notion
-
-Open (or create) the destination page in Notion and paste the file's
-contents directly into the page body. Notion recognizes Markdown on paste
-and converts `#`/`##` into headings and `---` into a divider automatically.
-
-## Self-hosted static site (texter.brokyrkan.nu)
-
-`generate_static_site.py` is a sibling script that renders the same song
-list as one self-contained static HTML page (no external assets/JS, no
-build step) instead of a Notion-ready Markdown file:
+`static-site/generate_static_site.py` fetches a plan's songs and renders
+them as one self-contained static HTML page (no external assets/JS, no
+build step):
 
 ```bash
-uv run generate_static_site.py                       # nearest upcoming plan -> site/index.html
-uv run generate_static_site.py --include-chords -o site/index.html
+uv run static-site/generate_static_site.py                       # nearest upcoming plan -> site/index.html
+uv run static-site/generate_static_site.py --include-chords -o site/index.html
 ```
 
 It always fetches plain lyrics unless `--include-chords` is given, and never
 includes PDF chord-chart links -- those are short-lived signed URLs, too
-fragile for a page that's regenerated once and left up all day. Otherwise
-its flags mirror `update_lyrics.py`'s (`--date`, `--plan-id`,
+fragile for a page that's regenerated once and left up all day. Its flags
+otherwise mirror `update_lyrics.py`'s (`--date`, `--plan-id`,
 `--service-type-id`, `--title-prefix`, `--list-service-types`).
 
 Each song is a native `<details>`/`<summary>` toggle -- collapsed to just
@@ -106,9 +81,10 @@ You can run it standalone (via a systemd timer / cron job, serving `site/`
 with any static-file web server), or use the containerized setup below,
 which adds the ability to take the site down between services.
 
-## Containerized deployment (podman)
+### Containerized deployment (podman)
 
-`Dockerfile.admin` + `Dockerfile.web` + `compose.yaml` package
+Everything for this lives in `static-site/`: `Dockerfile.admin` +
+`Dockerfile.web` + `nginx.conf` + `compose.yaml` package
 `generate_static_site.py` as two containers sharing a volume:
 
 - **`web`** -- a plain nginx:alpine container that serves whatever's in the
@@ -128,9 +104,14 @@ closed** (both on first run and on every container restart) until someone
 explicitly opens it from the admin UI.
 
 ```bash
-cp .env.example .env   # fill in Planning Center credentials + ADMIN_PASSWORD
+cp .env.example .env   # from repo root -- fill in Planning Center credentials + ADMIN_PASSWORD
+cd static-site
 podman compose up --build -d
 ```
+
+The build context is the repo root (both Dockerfiles need `pyproject.toml`/
+`uv.lock`/`src/` from up there), which `static-site/compose.yaml` already
+points at -- just run `podman compose` from inside `static-site/`.
 
 Then visit the admin UI (`http://<host>:9000/`, log in with `ADMIN_USERNAME`
 / `ADMIN_PASSWORD`) to regenerate + open the site for the service, and close
@@ -140,24 +121,70 @@ domain + TLS.
 
 If your `podman` doesn't bundle a compose provider, install
 [`podman-compose`](https://github.com/containers/podman-compose) instead --
-`podman compose` transparently shells out to it.
+`podman compose` transparently shells out to it. Plain `docker compose`
+works the same way if that's what you have instead.
 
 There's no scheduling here yet (regenerating and opening/closing are both
 manual) -- see the module docstring in `admin_app.py` if you want to extend
 it.
 
-## Live remote + wall display
+## Notion export
 
-`remote_display.py` is a third sibling script: a small local Flask app that
-lets a worship leader flip through a plan's songs from one device (phone/
-tablet) while a second device (e.g. a wall projector's browser) shows the
-current song's lyrics full-screen.
+`notion-export/update_lyrics.py` is the original script: it exports a
+plan's songs + lyrics into a single Markdown file, formatted so you can
+paste it straight into a Notion page (Notion auto-converts pasted Markdown
+headings/dividers into blocks). There's no Notion API integration here on
+purpose -- upload is a manual copy/paste step.
 
 ```bash
-uv run remote_display.py                       # nearest upcoming plan
-uv run remote_display.py --date 2024-08-04
-uv run remote_display.py --plan-id 12345 --service-type-id 6789
-uv run remote_display.py --port 8000
+# Nearest upcoming plan, plain lyrics only
+uv run notion-export/update_lyrics.py
+
+# A specific date
+uv run notion-export/update_lyrics.py --date 2024-08-04
+
+# A specific plan by id (skips date lookup)
+uv run notion-export/update_lyrics.py --plan-id 12345 --service-type-id 6789
+
+# Include chord charts instead of plain lyrics, custom output path
+uv run notion-export/update_lyrics.py --include-chords -o lovsang.md
+
+# List service types (to find --service-type-id)
+uv run notion-export/update_lyrics.py --list-service-types
+
+# Verbose logging for troubleshooting
+uv run notion-export/update_lyrics.py -v
+```
+
+Output is a Markdown file named `<PAGE_TITLE_PREFIX> - <date>.md` by default
+(e.g. `Lovsång Brokyrkan - 2024-08-04.md`), with:
+
+- `# <prefix> - <date>` as the page title
+- `## <song title>` for each song
+- the song's CCLI number (if present) in italics
+- the lyrics (or chord chart, with `--include-chords`) below it
+- a `---` divider between songs
+
+Open (or create) the destination page in Notion and paste the file's
+contents directly into the page body. Notion recognizes Markdown on paste
+and converts `#`/`##` into headings and `---` into a divider automatically.
+
+## Experimental: live remote + wall display
+
+**Untested proof of concept -- this has not actually been run against a
+real plan/device pair yet.** Included for reference; expect rough edges,
+and don't rely on it for a live service without trying it first.
+
+`experimental/remote_display.py` is a small local Flask app that lets a
+worship leader flip through a plan's songs from one device (phone/tablet)
+while a second device (e.g. a wall projector's browser) shows the current
+song's lyrics full-screen.
+
+```bash
+uv run experimental/remote_display.py                       # nearest upcoming plan
+uv run experimental/remote_display.py --date 2024-08-04
+uv run experimental/remote_display.py --plan-id 12345 --service-type-id 6789
+uv run experimental/remote_display.py --port 8000
 ```
 
 It prints two URLs to visit from devices on the same local network:
@@ -169,7 +196,7 @@ Both pages poll a small JSON endpoint every couple of seconds; there's no
 websocket/push machinery, no database, and no dependency on Planning Center
 Music Stand's own internal "Sessions" feature -- just the documented public
 Planning Center API. State lives in memory only and resets when the process
-restarts.
+restarts. No container packaging exists for this yet.
 
 ## Notes / things to double-check
 

@@ -2,6 +2,11 @@
 """
 remote_display.py
 
+UNTESTED PROOF OF CONCEPT -- this has not actually been run against a real
+plan/device pair yet. It's included for reference and because it may work,
+but expect rough edges; it's not part of the main static-site deployment
+(see ../static-site/) and has no container packaging.
+
 A small local web app that lets a worship leader flip through a Planning
 Center Services plan's songs from one device (phone/iPad) while a second
 device (wall projector browser) shows the current song's full lyrics.
@@ -20,10 +25,10 @@ websocket/push machinery, which keeps this simple and robust on a church
 WiFi network.
 
 Usage:
-    uv run remote_display.py                       # nearest upcoming plan
-    uv run remote_display.py --date 2024-08-04
-    uv run remote_display.py --plan-id 12345 --service-type-id 6789
-    uv run remote_display.py --port 8000
+    uv run experimental/remote_display.py                       # nearest upcoming plan
+    uv run experimental/remote_display.py --date 2024-08-04
+    uv run experimental/remote_display.py --plan-id 12345 --service-type-id 6789
+    uv run experimental/remote_display.py --port 8000
 
 Then, on the same local network:
     Leader's device:  http://<this-machine-ip>:8000/remote

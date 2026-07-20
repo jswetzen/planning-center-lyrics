@@ -28,7 +28,7 @@ TLS (a reverse proxy) rather than exposing it directly. See the
 Containerized deployment section of README.md.
 
 Usage:
-    uv run admin_app.py --port 9000
+    uv run static-site/admin_app.py --port 9000
 
 Requires PLANNING_CENTER_APP_ID, PLANNING_CENTER_SECRET, and ADMIN_PASSWORD
 in the environment (or a .env file).

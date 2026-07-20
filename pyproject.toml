@@ -1,5 +1,5 @@
 [project]
-name = "planning-center-songs"
+name = "planning-center-lyrics"
 version = "0.1.0"
 description = "Export song lyrics from a Planning Center Services plan to Markdown, a static HTML page, or a live remote/wall display."
 readme = "README.md"

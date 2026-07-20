@@ -213,7 +213,7 @@ wheels = [
 ]
 
 [[package]]
-name = "planning-center-songs"
+name = "planning-center-lyrics"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

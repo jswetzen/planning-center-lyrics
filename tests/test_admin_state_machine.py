@@ -217,6 +217,13 @@ def test_self_heals_stale_open_plan_when_closed(tmp_path):
     assert scheduler.read_open_plan(tmp_path) is None
 
 
+def test_healthz_requires_no_auth():
+    with admin_app.app.test_client() as client:
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+        assert resp.data == b"ok"
+
+
 # --------------------------------------------------------------------------
 # Settings routes (happy path)
 # --------------------------------------------------------------------------

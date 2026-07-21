@@ -109,6 +109,8 @@ _lock = threading.Lock()
 
 @app.before_request
 def _require_auth():
+    if request.path == "/healthz":
+        return
     auth = request.authorization
     if (
         not auth
@@ -118,6 +120,12 @@ def _require_auth():
         return Response(
             "Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="admin"'}
         )
+
+
+@app.route("/healthz")
+def healthz():
+    return "ok", 200
+
 
 _PLACEHOLDER_HTML = """<!doctype html>
 <html lang="sv">

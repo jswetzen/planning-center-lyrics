@@ -2,17 +2,25 @@ name: CI
 
 # build: confirms both container images still build after a change to the
 # Dockerfiles, pyproject.toml/uv.lock, or src/. Neither image is pushed
-# anywhere -- there's no registry configured for this project (see
-# static-site/compose.yaml, which builds locally via podman/docker compose).
+# anywhere here -- see the publish job below for the one that is.
 #
 # test: runs the pytest suite (currently: the scheduler/automation logic in
 # static-site/scheduler.py + admin_app.py).
+#
+# publish: on push to main only (never on PRs), after build+test both pass,
+# builds *just* the admin image (the web image stays a stock, unpublished
+# caddy:2 image -- see docs/) and pushes it to GHCR so it can be pulled by
+# tag from a deployment CT instead of built in-CT or pushed by hand.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
@@ -41,3 +49,37 @@ jobs:
       - run: uv sync --frozen
 
       - run: uv run pytest
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: static-site/Dockerfile.admin
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

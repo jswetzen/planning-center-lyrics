@@ -16,6 +16,7 @@ wheels/
 *.md
 !README.md
 !QUICKSTART.md
+!ARCHITECTURE.md
 site/
 
 # Debug artifacts from reverse-engineering the Music Stand app's API traffic -- not project files

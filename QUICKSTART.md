@@ -41,20 +41,20 @@ podman compose up --build -d
 (No podman-compose bundled? `podman-compose up --build -d` works too. Plain
 `docker compose` also works if that's what you have.)
 
-This starts two containers:
+This starts a single container listening on port `9000`, serving:
 
-- `admin` on port `9000` -- the control panel
-- `web` on port `8080` -- the actual public-facing site (starts closed)
+- `/` -- the actual public-facing site (starts closed)
+- `/admin` -- the control panel, gated by HTTP Basic Auth
 
 ## 4. Generate + open the site
 
-Visit `http://<host>:9000/`, log in with `admin` / your `ADMIN_PASSWORD`,
-then:
+Visit `http://<host>:9000/admin`, log in with `admin` / your
+`ADMIN_PASSWORD`, then:
 
 1. Click **Regenerate now** -- fetches the nearest upcoming plan's songs
    from Planning Center.
 2. Click **Open (serve lyrics)** -- makes the generated page live at
-   `http://<host>:8080/`.
+   `http://<host>:9000/`.
 
 ## 5. Close it after the service
 
@@ -65,9 +65,10 @@ container restart, so this isn't optional cleanup, it's the normal flow.
 
 ## Going further
 
-- Put a real reverse proxy (TLS) in front of port `8080` for a public
-  domain -- the admin UI's Basic Auth isn't encrypted on its own either, so
-  keep port `9000` behind TLS/a firewall too, not exposed directly.
+- Put a real reverse proxy (TLS) in front of port `9000` for a public
+  domain -- both `/` and `/admin` are served from the same port, and Basic
+  Auth on `/admin` isn't encrypted on its own, so it relies entirely on
+  that TLS termination rather than network isolation.
 - Don't want to click regenerate/open/close every service? The admin UI's
   "Manage rules" screen can automate it per service type -- see README.md's
   "Automation" section.

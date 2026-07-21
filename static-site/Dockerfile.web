@@ -1,7 +1,0 @@
-# Static file server for the site the admin container writes into
-# <DATA_DIR>/current/index.html. See README.md's "Containerized deployment"
-# section.
-
-FROM docker.io/library/nginx:1.27-alpine
-
-COPY static-site/nginx.conf /etc/nginx/conf.d/default.conf

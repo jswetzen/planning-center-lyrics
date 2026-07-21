@@ -1,5 +1,6 @@
-# Admin UI: regenerates the static lyrics site from Planning Center and
-# toggles it open/closed. See README.md's "Containerized deployment" section.
+# Serves both the public lyrics page ("/") and the Basic Auth-gated admin
+# UI ("/admin") that regenerates the site from Planning Center and toggles
+# it open/closed. See README.md's "Containerized deployment" section.
 
 FROM docker.io/library/python:3.12-alpine AS builder
 

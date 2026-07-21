@@ -131,7 +131,7 @@ def test_manual_open_blocks_automation_from_touching_it(tmp_path, monkeypatch):
     # Regenerate had been clicked), then a human clicks Open.
     admin_app._regenerate(tmp_path)
     with admin_app.app.test_client() as client:
-        resp = client.post("/open", headers=_auth_header())
+        resp = client.post("/admin/open", headers=_auth_header())
         assert resp.status_code in (302, 303)
 
     open_plan = scheduler.read_open_plan(tmp_path)
@@ -224,6 +224,27 @@ def test_healthz_requires_no_auth():
         assert resp.data == b"ok"
 
 
+def test_public_site_requires_no_auth_and_serves_current(tmp_path):
+    admin_app._apply_state(tmp_path, "closed")
+    admin_app._write_state(tmp_path, "closed")
+    with admin_app.app.test_client() as client:
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert b"Sidan visas bara under gudstj\xc3\xa4nsten" in resp.data
+
+
+def test_public_site_404s_before_current_exists(tmp_path):
+    with admin_app.app.test_client() as client:
+        resp = client.get("/")
+        assert resp.status_code == 404
+
+
+def test_admin_index_requires_auth():
+    with admin_app.app.test_client() as client:
+        resp = client.get("/admin")
+        assert resp.status_code == 401
+
+
 # --------------------------------------------------------------------------
 # Settings routes (happy path)
 # --------------------------------------------------------------------------
@@ -247,7 +268,7 @@ def test_settings_page_lists_rules(monkeypatch):
     ])
     admin_app.RULE_STORE.add("804383", "Söndagsgudstjänst")
     with admin_app.app.test_client() as client:
-        resp = client.get("/settings", headers=_auth_header())
+        resp = client.get("/admin/settings", headers=_auth_header())
         assert resp.status_code == 200
         assert b"S\xc3\xb6ndagsgudstj\xc3\xa4nst" in resp.data
 
@@ -258,7 +279,7 @@ def test_add_rule_route_creates_a_rule(monkeypatch):
     ])
     with admin_app.app.test_client() as client:
         resp = client.post(
-            "/settings/rules", data={"service_type_id": "979578", "title_prefix": ""}, headers=_auth_header()
+            "/admin/settings/rules", data={"service_type_id": "979578", "title_prefix": ""}, headers=_auth_header()
         )
         assert resp.status_code in (302, 303)
 
@@ -271,8 +292,8 @@ def test_add_rule_route_creates_a_rule(monkeypatch):
 def test_toggle_and_delete_rule_routes():
     rule = admin_app.RULE_STORE.add("804383", "Söndagsgudstjänst")
     with admin_app.app.test_client() as client:
-        client.post(f"/settings/rules/{rule.id}/toggle", headers=_auth_header())
+        client.post(f"/admin/settings/rules/{rule.id}/toggle", headers=_auth_header())
         assert admin_app.RULE_STORE.get(rule.id).enabled is False
 
-        client.post(f"/settings/rules/{rule.id}/delete", headers=_auth_header())
+        client.post(f"/admin/settings/rules/{rule.id}/delete", headers=_auth_header())
         assert admin_app.RULE_STORE.get(rule.id) is None

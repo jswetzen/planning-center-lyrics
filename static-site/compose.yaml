@@ -1,37 +1,26 @@
-# Two-container deployment: `admin` regenerates the site from Planning
-# Center and toggles it open/closed; `web` just serves whatever `admin`
-# last wrote. See README.md's "Containerized deployment" section.
+# Single-container deployment: one Flask app serves the public lyrics page
+# ("/") and the Basic Auth-gated admin UI ("/admin") that regenerates the
+# site from Planning Center and toggles it open/closed. See README.md's
+# "Containerized deployment" section.
 #
-# Build context is the repo root (".."), not this directory -- both
-# Dockerfiles need pyproject.toml/uv.lock/src/ from up there.
+# Build context is the repo root (".."), not this directory -- the
+# Dockerfile needs pyproject.toml/uv.lock/src/ from up there.
 #
 # Usage (rootless podman, from this directory):
 #   podman compose up --build -d
 #   # or, if your podman doesn't bundle compose: podman-compose up --build -d
 
 services:
-  admin:
+  app:
     build:
       context: ..
-      dockerfile: static-site/Dockerfile.admin
+      dockerfile: static-site/Dockerfile
     env_file:
       - ../.env
     volumes:
       - site-data:/data
     ports:
       - "9000:9000"
-    restart: unless-stopped
-
-  web:
-    build:
-      context: ..
-      dockerfile: static-site/Dockerfile.web
-    volumes:
-      - site-data:/data:ro
-    ports:
-      - "8080:80"
-    depends_on:
-      - admin
     restart: unless-stopped
 
 volumes:

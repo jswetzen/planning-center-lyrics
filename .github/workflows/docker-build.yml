@@ -1,16 +1,16 @@
 name: CI
 
-# build: confirms both container images still build after a change to the
-# Dockerfiles, pyproject.toml/uv.lock, or src/. Neither image is pushed
-# anywhere here -- see the publish job below for the one that is.
+# build: confirms the container image still builds after a change to the
+# Dockerfile, pyproject.toml/uv.lock, or src/. Not pushed anywhere here --
+# see the publish job below for the one that is.
 #
 # test: runs the pytest suite (currently: the scheduler/automation logic in
 # static-site/scheduler.py + admin_app.py).
 #
 # publish: on push to main only (never on PRs), after build+test both pass,
-# builds *just* the admin image (the web image stays a stock, unpublished
-# caddy:2 image -- see docs/) and pushes it to GHCR so it can be pulled by
-# tag from a deployment CT instead of built in-CT or pushed by hand.
+# builds the image (serves both the public "/" route and the "/admin"
+# control UI -- see docs/) and pushes it to GHCR so it can be pulled by tag
+# from a deployment CT instead of built in-CT or pushed by hand.
 
 on:
   push:
@@ -25,9 +25,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        image: [admin, web]
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +33,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: static-site/Dockerfile.${{ matrix.image }}
+          file: static-site/Dockerfile
           push: false
 
   test:
@@ -79,7 +76,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: static-site/Dockerfile.admin
+          file: static-site/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

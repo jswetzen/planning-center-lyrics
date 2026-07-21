@@ -2,7 +2,7 @@
 
 Pulls the song list + lyrics out of a Planning Center Services plan. The
 main thing here is a **self-hosted static lyrics site with a containerized
-admin/web deployment** (`static-site/`); a Notion-export script
+admin+web deployment** (`static-site/`); a Notion-export script
 (`notion-export/`) and an untested live remote/wall-display proof of concept
 (`experimental/`) are also included.
 
@@ -13,7 +13,7 @@ running. This file has the full picture, including the other two tools.
 
 ```
 src/pco_client/       Shared Planning Center API client (used by everything below)
-static-site/          Main feature: static HTML site + admin/web containers + compose
+static-site/          Main feature: static HTML site + admin/web Flask app + compose
 notion-export/        Notion-ready Markdown export (the original script)
 experimental/         Live remote/wall display -- untested proof of concept
 ```
@@ -83,20 +83,21 @@ which adds the ability to take the site down between services.
 
 ### Containerized deployment (podman)
 
-Everything for this lives in `static-site/`: `Dockerfile.admin` +
-`Dockerfile.web` + `nginx.conf` + `compose.yaml` package
-`generate_static_site.py` as two containers sharing a volume:
+Everything for this lives in `static-site/`: `Dockerfile` + `compose.yaml`
+package `generate_static_site.py` and `admin_app.py` as a single Flask app
+serving two route groups:
 
-- **`web`** -- a plain nginx:alpine container that serves whatever's in the
-  shared volume's `current/index.html`. This is what's actually reachable
-  from the internet (e.g. as texter.brokyrkan.nu).
-- **`admin`** -- a small Flask app (`admin_app.py`) with three buttons:
-  regenerate the site from Planning Center, open it (copy the generated
-  page into `current/`), or close it (replace `current/` with a "come back
-  Sunday" placeholder). Gated by HTTP Basic Auth (`ADMIN_USERNAME` /
-  `ADMIN_PASSWORD` -- see `.env.example`; it refuses to start without a
-  password set). Basic Auth isn't encrypted on its own, so still keep this
-  behind TLS (a reverse proxy) rather than exposing it directly.
+- **`/`** -- public, unauthenticated. Serves whatever `current/index.html`
+  currently holds -- the generated lyrics page, or a "come back Sunday"
+  placeholder. This is what's actually reachable from the internet (e.g. as
+  texter.brokyrkan.nu).
+- **`/admin`** -- three buttons: regenerate the site from Planning Center,
+  open it (copy the generated page into `current/`), or close it (replace
+  `current/` with the placeholder). Gated by HTTP Basic Auth
+  (`ADMIN_USERNAME` / `ADMIN_PASSWORD` -- see `.env.example`; the app
+  refuses to start without a password set). Basic Auth isn't encrypted on
+  its own, so still keep this behind TLS (a reverse proxy) rather than
+  exposing it directly.
 
 This exists because song lyrics are CCLI-licensed for the service they're
 used in, not for being publicly readable all week -- **the site defaults to
@@ -109,24 +110,24 @@ cd static-site
 podman compose up --build -d
 ```
 
-The build context is the repo root (both Dockerfiles need `pyproject.toml`/
+The build context is the repo root (the Dockerfile needs `pyproject.toml`/
 `uv.lock`/`src/` from up there), which `static-site/compose.yaml` already
 points at -- just run `podman compose` from inside `static-site/`.
 
-Then visit the admin UI (`http://<host>:9000/`, log in with `ADMIN_USERNAME`
-/ `ADMIN_PASSWORD`) to regenerate + open the site for the service, and close
-it again afterwards. The generated site itself is served at
-`http://<host>:8080/`; put a reverse proxy in front of that port for a real
-domain + TLS.
+Then visit the admin UI (`http://<host>:9000/admin`, log in with
+`ADMIN_USERNAME` / `ADMIN_PASSWORD`) to regenerate + open the site for the
+service, and close it again afterwards. The generated site itself is served
+at `http://<host>:9000/`; put a reverse proxy in front of that port for a
+real domain + TLS.
 
 ### Automation (scheduled open/close)
 
 The admin UI's "Manage rules" screen lets you configure automation rules --
 one per Planning Center service type -- so the site opens and closes itself
 instead of requiring a manual click for every service. A background
-scheduler (no cron/systemd timer needed; it runs inside the admin
-container) re-checks enabled rules every `SCHEDULER_POLL_SECONDS` (default
-300).
+scheduler (no cron/systemd timer needed; it runs as a thread inside the
+same process) re-checks enabled rules every `SCHEDULER_POLL_SECONDS`
+(default 300).
 
 For each enabled rule, at every check the scheduler looks up *today's* plan
 for that service type and only acts if it looks real enough to trust: the

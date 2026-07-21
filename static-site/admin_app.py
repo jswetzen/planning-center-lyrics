@@ -2,12 +2,17 @@
 """
 admin_app.py
 
-Local admin UI for the static site (see generate_static_site.py): lets
-someone manually regenerate it from Planning Center and switch what's
-actually being served between the generated lyrics page and a "come back
-Sunday" placeholder -- plus a rule-based scheduler (see scheduler.py) that
-does the same open/close automatically, driven by each configured service
-type's actual plan data for today.
+Single Flask app that serves both halves of the lyrics site:
+
+    /            public, unauthenticated -- whatever current/index.html
+                 currently holds (the generated lyrics page, or a "come
+                 back Sunday" placeholder)
+    /admin/*     HTTP Basic Auth-gated control UI -- regenerate the site
+                 from Planning Center and switch what's live between the
+                 generated page and the placeholder, plus a rule-based
+                 scheduler (see scheduler.py) that does the same open/close
+                 automatically, driven by each configured service type's
+                 actual plan data for today.
 
 This exists because song lyrics are only licensed (via CCLI) to be
 displayed for the service they're used in -- leaving the generated page up
@@ -15,16 +20,19 @@ publicly all week is exactly what the open/closed toggle here prevents.
 Automation never overrides that: it only opens when a plan looks real
 enough to trust (see scheduler.evaluate_rule's guardrail), and manual
 actions always win over automation immediately (see _tick's state machine
-below).
+below). `/` itself has no logic of its own -- it just returns whatever
+current/index.html holds, so the open/closed decision is made in exactly
+one place (the /admin routes and the scheduler), not duplicated in the
+public route.
 
 Layout on the shared data directory (see DATA_DIR):
     <DATA_DIR>/site/index.html      latest output of generate_static_site.py
     <DATA_DIR>/site/index.plan.json which plan site/index.html was generated from
-    <DATA_DIR>/current/index.html   what the web-facing server actually serves
+    <DATA_DIR>/current/index.html   what the "/" route actually serves
     <DATA_DIR>/state.txt             "open" or "closed"
     <DATA_DIR>/open_plan.json        which plan is live right now (if state=="open")
                                       and whether a human or automation opened it
-    <DATA_DIR>/rules.json            configured automation rules (see /settings)
+    <DATA_DIR>/rules.json            configured automation rules (see /admin/settings)
 
 Regenerating always refreshes site/index.html; it only touches
 current/index.html (what's actually public) if the site is currently open
@@ -32,12 +40,12 @@ current/index.html (what's actually public) if the site is currently open
 *that* plan rather than falling back to "nearest upcoming", so a manual
 "Regenerate now" click mid-service can't silently swap in the wrong plan.
 
-Gated by HTTP Basic Auth (ADMIN_USERNAME / ADMIN_PASSWORD, see
-.env.example) -- it can trigger regeneration and control whether
-copyrighted lyrics are publicly served, so it refuses to start without a
-password set. Basic Auth itself isn't encrypted, so still keep this behind
-TLS (a reverse proxy) rather than exposing it directly. See the
-Containerized deployment section of README.md.
+Every route under /admin is gated by HTTP Basic Auth (ADMIN_USERNAME /
+ADMIN_PASSWORD, see .env.example) -- it can trigger regeneration and
+control whether copyrighted lyrics are publicly served, so the app refuses
+to start without a password set. Basic Auth itself isn't encrypted, so
+still keep this behind TLS (a reverse proxy) rather than exposing it
+directly. See the Containerized deployment section of README.md.
 
 Usage:
     uv run static-site/admin_app.py --port 9000
@@ -66,7 +74,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from flask import Flask, Response, redirect, request, url_for
+from flask import Blueprint, Flask, Response, redirect, request, send_file, url_for
 
 from pco_client import PlanningCenterError, build_session, list_service_types
 from scheduler import OpenPlan, RuleStore, clear_open_plan, evaluate_rule, read_open_plan, write_open_plan
@@ -80,6 +88,7 @@ log = logging.getLogger("admin_app")
 load_dotenv()
 
 app = Flask(__name__)
+admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 TITLE_PREFIX = os.environ.get("PAGE_TITLE_PREFIX", "Lovsång Brokyrkan")
@@ -109,7 +118,9 @@ _lock = threading.Lock()
 
 @app.before_request
 def _require_auth():
-    if request.path == "/healthz":
+    # Only /admin/* is gated -- "/" (the public lyrics page/placeholder)
+    # and "/healthz" are intentionally reachable without credentials.
+    if not request.path.startswith("/admin"):
         return
     auth = request.authorization
     if (
@@ -125,6 +136,14 @@ def _require_auth():
 @app.route("/healthz")
 def healthz():
     return "ok", 200
+
+
+@app.route("/")
+def public_site():
+    current_path = _paths(DATA_DIR)["current"]
+    if not current_path.exists():
+        return "Not found", 404
+    return send_file(current_path)
 
 
 _PLACEHOLDER_HTML = """<!doctype html>
@@ -468,7 +487,7 @@ def _scheduler_loop(data_dir: Path, poll_seconds: int) -> None:
 # --------------------------------------------------------------------------
 
 
-@app.route("/")
+@admin_bp.route("/")
 def index():
     state = _read_state(DATA_DIR)
     site_path = _paths(DATA_DIR)["site"]
@@ -496,16 +515,16 @@ def index():
         generated_at=escape(generated_at),
         open_plan_html=open_plan_html,
         error_html=error_html,
-        regenerate_url=url_for("regenerate"),
-        open_url=url_for("open_site"),
-        close_url=url_for("close_site"),
-        settings_url=url_for("settings"),
+        regenerate_url=url_for("admin.regenerate"),
+        open_url=url_for("admin.open_site"),
+        close_url=url_for("admin.close_site"),
+        settings_url=url_for("admin.settings"),
         enabled_rule_count=sum(1 for r in rules if r.enabled),
         total_rule_count=len(rules),
     )
 
 
-@app.route("/regenerate", methods=["POST"])
+@admin_bp.route("/regenerate", methods=["POST"])
 def regenerate():
     try:
         with _lock:
@@ -522,13 +541,13 @@ def regenerate():
             if _read_state(DATA_DIR) == "open":
                 _apply_state(DATA_DIR, "open")
         log.info("Regenerated site.")
-        return redirect(url_for("index"))
+        return redirect(url_for("admin.index"))
     except RuntimeError as exc:
         log.error("Regenerate failed: %s", exc)
-        return redirect(url_for("index", error=str(exc)))
+        return redirect(url_for("admin.index", error=str(exc)))
 
 
-@app.route("/open", methods=["POST"])
+@admin_bp.route("/open", methods=["POST"])
 def open_site():
     try:
         with _lock:
@@ -549,20 +568,20 @@ def open_site():
                 clear_open_plan(DATA_DIR)
     except RuntimeError as exc:
         log.error("Could not open site: %s", exc)
-        return redirect(url_for("index", error=str(exc)))
-    return redirect(url_for("index"))
+        return redirect(url_for("admin.index", error=str(exc)))
+    return redirect(url_for("admin.index"))
 
 
-@app.route("/close", methods=["POST"])
+@admin_bp.route("/close", methods=["POST"])
 def close_site():
     with _lock:
         _apply_state(DATA_DIR, "closed")
         _write_state(DATA_DIR, "closed")
         clear_open_plan(DATA_DIR)
-    return redirect(url_for("index"))
+    return redirect(url_for("admin.index"))
 
 
-@app.route("/settings")
+@admin_bp.route("/settings")
 def settings():
     rules = RULE_STORE.load()
     error = request.args.get("error")
@@ -586,8 +605,8 @@ def settings():
                 last_plan_title=escape(r.last_plan_title or "--"),
                 last_window=window,
                 last_reason=escape(r.last_reason or "--"),
-                toggle_url=url_for("toggle_rule", rule_id=r.id),
-                delete_url=url_for("delete_rule", rule_id=r.id),
+                toggle_url=url_for("admin.toggle_rule", rule_id=r.id),
+                delete_url=url_for("admin.delete_rule", rule_id=r.id),
                 toggle_label="Disable" if r.enabled else "Enable",
             )
         )
@@ -604,46 +623,49 @@ def settings():
 
     return _SETTINGS_TEMPLATE.format(
         title_prefix=escape(TITLE_PREFIX),
-        index_url=url_for("index"),
+        index_url=url_for("admin.index"),
         error_html=error_html,
         rows_html=rows_html,
-        add_url=url_for("add_rule"),
+        add_url=url_for("admin.add_rule"),
         service_type_options=service_type_options,
     )
 
 
-@app.route("/settings/rules", methods=["POST"])
+@admin_bp.route("/settings/rules", methods=["POST"])
 def add_rule():
     service_type_id = request.form.get("service_type_id", "").strip()
     title_prefix = request.form.get("title_prefix", "").strip() or None
     if not service_type_id:
-        return redirect(url_for("settings", error="Choose a service type."))
+        return redirect(url_for("admin.settings", error="Choose a service type."))
 
     try:
         service_types = {st["id"]: st["attributes"].get("name") for st in list_service_types(SESSION)}
     except PlanningCenterError as exc:
-        return redirect(url_for("settings", error=str(exc)))
+        return redirect(url_for("admin.settings", error=str(exc)))
 
     service_type_name = service_types.get(service_type_id, service_type_id)
     with _lock:
         RULE_STORE.add(service_type_id, service_type_name, title_prefix)
-    return redirect(url_for("settings"))
+    return redirect(url_for("admin.settings"))
 
 
-@app.route("/settings/rules/<rule_id>/toggle", methods=["POST"])
+@admin_bp.route("/settings/rules/<rule_id>/toggle", methods=["POST"])
 def toggle_rule(rule_id: str):
     with _lock:
         rule = RULE_STORE.get(rule_id)
         if rule:
             RULE_STORE.set_enabled(rule_id, not rule.enabled)
-    return redirect(url_for("settings"))
+    return redirect(url_for("admin.settings"))
 
 
-@app.route("/settings/rules/<rule_id>/delete", methods=["POST"])
+@admin_bp.route("/settings/rules/<rule_id>/delete", methods=["POST"])
 def delete_rule(rule_id: str):
     with _lock:
         RULE_STORE.delete(rule_id)
-    return redirect(url_for("settings"))
+    return redirect(url_for("admin.settings"))
+
+
+app.register_blueprint(admin_bp)
 
 
 # --------------------------------------------------------------------------
@@ -699,7 +721,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.exception("Initial scheduler tick failed.")
     threading.Thread(target=_scheduler_loop, args=(DATA_DIR, SCHEDULER_POLL_SECONDS), daemon=True).start()
 
-    print(f"\nAdmin UI: http://localhost:{args.port}/\n")
+    print(f"\nPublic site: http://localhost:{args.port}/\nAdmin UI:    http://localhost:{args.port}/admin\n")
     app.run(host=args.host, port=args.port, threaded=True)
     return 0
 

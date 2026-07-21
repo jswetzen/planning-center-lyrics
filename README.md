@@ -119,14 +119,38 @@ it again afterwards. The generated site itself is served at
 `http://<host>:8080/`; put a reverse proxy in front of that port for a real
 domain + TLS.
 
+### Automation (scheduled open/close)
+
+The admin UI's "Manage rules" screen lets you configure automation rules --
+one per Planning Center service type -- so the site opens and closes itself
+instead of requiring a manual click for every service. A background
+scheduler (no cron/systemd timer needed; it runs inside the admin
+container) re-checks enabled rules every `SCHEDULER_POLL_SECONDS` (default
+300).
+
+For each enabled rule, at every check the scheduler looks up *today's* plan
+for that service type and only acts if it looks real enough to trust: the
+plan must exist, have at least one song, and have a scheduled time whose
+duration isn't a degenerate placeholder (Planning Center accounts can and do
+accumulate these -- exact 0-duration entries have been observed in the
+wild). If any of that fails, the site is left exactly as it was and the
+reason is recorded on the rule, visible on the settings screen. When it
+passes, the site opens automatically at the plan's scheduled start time and
+closes at its scheduled end time.
+
+Manual actions (the three buttons above) always take priority -- automation
+will never re-open something a human just closed, or auto-close something a
+human opened manually. It only ever opens when the site is closed with
+nothing already live, and only auto-closes a window it opened itself.
+
+`SCHEDULER_TIMEZONE` (default `Europe/Stockholm`) controls what "today"
+means for this comparison; set it to your church's local timezone, since
+Planning Center's API returns times in UTC.
+
 If your `podman` doesn't bundle a compose provider, install
 [`podman-compose`](https://github.com/containers/podman-compose) instead --
 `podman compose` transparently shells out to it. Plain `docker compose`
 works the same way if that's what you have instead.
-
-There's no scheduling here yet (regenerating and opening/closing are both
-manual) -- see the module docstring in `admin_app.py` if you want to extend
-it.
 
 ## Notion export
 

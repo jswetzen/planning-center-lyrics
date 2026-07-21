@@ -1,9 +1,12 @@
-name: Docker build
+name: CI
 
-# Build-only check: confirms both container images still build after a
-# change to the Dockerfiles, pyproject.toml/uv.lock, or src/. Neither image
-# is pushed anywhere -- there's no registry configured for this project (see
+# build: confirms both container images still build after a change to the
+# Dockerfiles, pyproject.toml/uv.lock, or src/. Neither image is pushed
+# anywhere -- there's no registry configured for this project (see
 # static-site/compose.yaml, which builds locally via podman/docker compose).
+#
+# test: runs the pytest suite (currently: the scheduler/automation logic in
+# static-site/scheduler.py + admin_app.py).
 
 on:
   push:
@@ -27,3 +30,14 @@ jobs:
           context: .
           file: static-site/Dockerfile.${{ matrix.image }}
           push: false
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - run: uv sync --frozen
+
+      - run: uv run pytest

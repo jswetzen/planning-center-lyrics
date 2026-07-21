@@ -22,3 +22,15 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "pco_client"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+# scheduler.py lives in static-site/ (a standalone-scripts dir, not a package
+# under src/) -- add it to pythonpath so tests can `import scheduler` without
+# a conftest.py hack. pco_client is already importable via the editable
+# project install uv sync performs.
+[tool.pytest.ini_options]
+pythonpath = ["static-site"]

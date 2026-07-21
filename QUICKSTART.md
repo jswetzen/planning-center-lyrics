@@ -68,8 +68,8 @@ container restart, so this isn't optional cleanup, it's the normal flow.
 - Put a real reverse proxy (TLS) in front of port `8080` for a public
   domain -- the admin UI's Basic Auth isn't encrypted on its own either, so
   keep port `9000` behind TLS/a firewall too, not exposed directly.
-- There's no scheduling yet -- regenerate/open/close are manual steps each
-  time. See `static-site/admin_app.py`'s module docstring if you want to
-  automate it.
+- Don't want to click regenerate/open/close every service? The admin UI's
+  "Manage rules" screen can automate it per service type -- see README.md's
+  "Automation" section.
 - Full details, the Notion export tool, and the experimental live display
   are all in [README.md](README.md).

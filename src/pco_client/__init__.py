@@ -169,7 +169,21 @@ def find_upcoming_plan(
 def find_plan_by_date(
     session: requests.Session, target: date, service_type_id: Optional[str]
 ) -> tuple[str, dict]:
-    """Find a plan whose date matches `target`, optionally scoped to one service type."""
+    """Find a plan whose date matches `target`, optionally scoped to one service type.
+
+    Skips plans with no scheduled time attached (service_time_count ==
+    rehearsal_time_count == other_time_count == 0). Planning Center gives
+    these a `sort_date` of "whenever this API request happened" instead of a
+    real stored value (confirmed empirically: re-fetching the same plan
+    seconds apart returns a different, ever-increasing sort_date) -- so an
+    unscheduled draft plan left over in a service type spuriously matches
+    *today* on every single call, on every single day, forever. Left
+    unfiltered, such a plan can permanently shadow a real dated plan that
+    happens to sort later in the API's response order. A plan with no
+    scheduled time also can't answer "what's the plan for this date" in any
+    meaningful sense, so excluding it outright is correct, not just a
+    workaround.
+    """
     service_type_ids = (
         [service_type_id] if service_type_id else [st["id"] for st in list_service_types(session)]
     )
@@ -177,7 +191,15 @@ def find_plan_by_date(
     for st_id in service_type_ids:
         plans = api_get_all_pages(session, f"/service_types/{st_id}/plans", order="sort_date")
         for plan in plans:
-            sort_date = plan["attributes"].get("sort_date", "")
+            attrs = plan["attributes"]
+            has_scheduled_time = (
+                attrs.get("service_time_count", 0)
+                + attrs.get("rehearsal_time_count", 0)
+                + attrs.get("other_time_count", 0)
+            ) > 0
+            if not has_scheduled_time:
+                continue
+            sort_date = attrs.get("sort_date", "")
             if sort_date.startswith(target.isoformat()):
                 return st_id, plan
 

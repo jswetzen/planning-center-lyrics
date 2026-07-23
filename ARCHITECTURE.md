@@ -130,6 +130,52 @@ legitimate ones in the same service type. A rule only fires if:
 Anything that fails is recorded as `skipped` with the specific reason, visible on
 `/admin/settings` — automation never guesses; it either has a plan it trusts or it does nothing.
 
+### Planning Center's plan-time data model, and how to schedule a plan correctly
+
+A Planning Center plan does **not** carry an independent "date" field you set directly. What
+looks like a date (`attributes.dates`, e.g. `"23 July 2026"`, or `"No dates"` for a plan with
+none) is a *display string computed from the plan's `PlanTime` rows* — Service Time, Rehearsal
+Time, or Other Time blocks you add from the plan's "Times" tab in the Services UI. No PlanTime
+rows means no date, no matter what the plan's title or position in a series implies.
+
+**To make a plan discoverable by date (and therefore automatable), it needs an actual PlanTime**
+with the real start/end on the intended day — not just existing under the right service type.
+Creating a plan and leaving its Times tab empty produces a plan `find_plan_by_date` (and the
+scheduler built on it) can never correctly place.
+
+**The pitfall this caused (found 2026-07-23, fixed in `pco_client.find_plan_by_date`):** for a
+plan with zero PlanTime rows, Planning Center's API doesn't return a null/empty `sort_date` — it
+fills in the timestamp of *whenever you happened to call the API*, confirmed by re-fetching the
+same plan a few seconds apart and watching `sort_date` tick forward with it. That means a
+dateless draft plan left over in a service type spuriously matches **today's date on every single
+lookup, every single day, forever** — and if it sorts earlier in the API's response than a real
+dated plan for the same day, `find_plan_by_date` (which used to take the first string-prefix
+match with no other filtering) would return the ghost plan and never reach the real one. This is
+exactly what happened to the "Special Events" service type on this account: it had accumulated
+several old dateless plans (leftover drafts/one-offs, e.g. `"Kingdom Intensive Okt 21"`,
+`"Weekend25 Fredag Kväll"`), and one of them permanently shadowed a real plan created for
+2026-07-23.
+
+The fix: `find_plan_by_date` now skips any plan whose
+`service_time_count + rehearsal_time_count + other_time_count == 0` before checking `sort_date`
+at all — those three counts are returned directly on the plan resource, so this needs no extra
+API call. A plan with no scheduled time literally cannot answer "what's the plan for this date,"
+so excluding it is correct, not a workaround for bad data — but it's also why the guardrail in
+`evaluate_rule` (above) is deliberately layered on top rather than trusting *any* single field:
+Planning Center data on this account has repeatedly turned out to need cross-checking, not blind
+trust, at more than one layer.
+
+**Checklist for a plan you expect a rule to pick up:**
+1. Plan exists under the rule's configured service type.
+2. Plan has at least one song item.
+3. Plan's Times tab has a real Service Time (or Rehearsal/Other) block with the correct date and
+   a plausible (non-zero, non-multi-day) duration — this is what ends up in `plan_times` /
+   `dates` / `sort_date`; skipping this step is the single most common way a plan silently fails
+   to be picked up.
+4. If it's still not firing, check `/admin/settings` for that rule's `last_action`/`last_reason`
+   — every skip is logged there with the specific guardrail that rejected it, so start there
+   before reaching for the API directly.
+
 **Priority rule, enforced by `_tick`'s own control flow, not a special case**: manual actions
 (the three UI buttons under `/admin`) always win immediately. Automation only ever opens when the site is
 closed *and* nothing is already tracked as live; it only ever auto-closes a window it opened

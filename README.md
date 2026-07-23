@@ -16,10 +16,12 @@ running. This file has the full picture, including the other two tools.
 > automation against a real service yet. I have not done a real security
 > review -- including of how the Planning Center access token is stored and
 > handled -- and haven't otherwise vetted it for fitness for any particular
-> purpose. There are no automated tests. Anyone looking closely at the code
-> will likely spot this quickly. Use at your own risk; read the code before
-> trusting it with your own Planning Center credentials or deploying it
-> publicly.
+> purpose. There's unit test coverage for the scheduler/state-machine logic
+> (`tests/`, run in CI), but no integration tests against the real Planning
+> Center API and no coverage at all for the Notion-export or experimental
+> tools. Anyone looking closely at the code will likely spot rough edges
+> quickly. Use at your own risk; read the code before trusting it with your
+> own Planning Center credentials or deploying it publicly.
 
 ## Repo layout
 

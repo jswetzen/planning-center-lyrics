@@ -9,6 +9,16 @@ admin+web deployment** (`static-site/`); a Notion-export script
 In a hurry? See [QUICKSTART.md](QUICKSTART.md) to get the containerized site
 running. This file has the full picture, including the other two tools.
 
+> [!WARNING]
+> **This is vibe-coded and alpha quality.** Nearly all of it was written by
+> an AI coding agent. It does what I personally wanted it to do, but I have
+> not done a real security review -- including of how the Planning Center
+> access token is stored and handled -- and haven't otherwise vetted it for
+> fitness for any particular purpose. There are no automated tests. Anyone
+> looking closely at the code will likely spot this quickly. Use at your own
+> risk; read the code before trusting it with your own Planning Center
+> credentials or deploying it publicly.
+
 ## Repo layout
 
 ```

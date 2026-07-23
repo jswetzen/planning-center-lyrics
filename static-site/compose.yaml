@@ -3,18 +3,21 @@
 # site from Planning Center and toggles it open/closed. See README.md's
 # "Containerized deployment" section.
 #
-# Build context is the repo root (".."), not this directory -- the
-# Dockerfile needs pyproject.toml/uv.lock/src/ from up there.
+# Pulls the prebuilt image published by .github/workflows/docker-build.yml on
+# every push to main, rather than building locally -- keeps this in sync with
+# the same image the mikro-iac deployment runs (apps/poc-lyrics.nix). If
+# you're iterating on the Dockerfile/app code itself, build it directly
+# instead (`podman build -f Dockerfile -t planning-center-lyrics ..` from
+# this directory) and point `image:` below at that tag temporarily.
 #
 # Usage (rootless podman, from this directory):
-#   podman compose up --build -d
-#   # or, if your podman doesn't bundle compose: podman-compose up --build -d
+#   podman compose pull && podman compose up -d
+#   # or, if your podman doesn't bundle compose: podman-compose pull && podman-compose up -d
 
 services:
   app:
-    build:
-      context: ..
-      dockerfile: static-site/Dockerfile
+    image: ghcr.io/jswetzen/planning-center-lyrics:main
+    pull_policy: always
     env_file:
       - ../.env
     volumes:

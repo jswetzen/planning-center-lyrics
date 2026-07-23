@@ -31,15 +31,17 @@ ADMIN_PASSWORD=...
 `ADMIN_PASSWORD` gates the admin UI below -- pick something real, the
 container refuses to start without it.
 
-## 3. Build and start the containers
+## 3. Pull and start the container
 
 ```bash
 cd static-site
-podman compose up --build -d
+podman compose pull && podman compose up -d
 ```
 
-(No podman-compose bundled? `podman-compose up --build -d` works too. Plain
-`docker compose` also works if that's what you have.)
+This pulls the prebuilt `ghcr.io/jswetzen/planning-center-lyrics:main` image
+rather than building locally. (No podman-compose bundled? `podman-compose
+pull && podman-compose up -d` works too. Plain `docker compose` also works
+if that's what you have.)
 
 This starts a single container listening on port `9000`, serving:
 

@@ -121,12 +121,15 @@ explicitly opens it from the admin UI.
 ```bash
 cp .env.example .env   # from repo root -- fill in Planning Center credentials + ADMIN_PASSWORD
 cd static-site
-podman compose up --build -d
+podman compose pull && podman compose up -d
 ```
 
-The build context is the repo root (the Dockerfile needs `pyproject.toml`/
-`uv.lock`/`src/` from up there), which `static-site/compose.yaml` already
-points at -- just run `podman compose` from inside `static-site/`.
+`compose.yaml` pulls the prebuilt `ghcr.io/jswetzen/planning-center-lyrics:main`
+image -- the same one `.github/workflows/docker-build.yml` publishes on every
+push to main -- rather than building locally, so `podman compose pull`
+always fetches the latest `main` before starting. If you're iterating on the
+Dockerfile or app code itself, see the comment at the top of `compose.yaml`
+for how to point it at a local build instead.
 
 Then visit the admin UI (`http://<host>:9000/admin`, log in with
 `ADMIN_USERNAME` / `ADMIN_PASSWORD`) to regenerate + open the site for the

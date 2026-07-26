@@ -712,10 +712,22 @@ def delete_rule(rule_id: str):
 
 app.register_blueprint(admin_bp)
 
-# Live projection (/project, /remote, /admin/live). Shares this module's
-# _lock so a session/theme write can't interleave with an open/close or a
-# scheduler tick touching the same DATA_DIR.
-live_routes.init_app(app, live_routes.LiveContext(data_dir=DATA_DIR, session=SESSION, lock=_lock))
+# Live projection (/live, /remote, /admin/live). Shares this module's _lock
+# so a session/theme write can't interleave with an open/close or a scheduler
+# tick touching the same DATA_DIR.
+#
+# `site_is_open` is injected rather than imported: the public /live route
+# serves lyrics only while the site is open, and that decision has to keep
+# living here, in the one module that owns state.txt.
+live_routes.init_app(
+    app,
+    live_routes.LiveContext(
+        data_dir=DATA_DIR,
+        session=SESSION,
+        lock=_lock,
+        site_is_open=lambda: _read_state(DATA_DIR) == "open",
+    ),
+)
 
 
 # --------------------------------------------------------------------------

@@ -27,8 +27,8 @@ flowchart LR
         GEN
         PUBLIC["/  (public, no auth)"]
         ADMINR["/admin/*  (ADMIN_PASSWORD)"]
-        REMOTE["/remote/*  (REMOTE_PASSWORD)"]
-        PROJECT["/project/token  (URL token, read-only)"]
+        REMOTE["/remote/*  (ADMIN_PASSWORD)"]
+        PROJECT["/live  (public, read-only,\ngated on state.txt)"]
         SCHED[scheduler.py<br/>pure logic, no Flask]
         LIVER[live_routes.py]
         LIVES[live_session.py<br/>pure logic, no Flask]
@@ -46,7 +46,6 @@ flowchart LR
         OPENPLAN[open_plan.json]
         RULES[rules.json]
         LIVEJSON[live_session.json]
-        TOKEN[display_token.txt]
     end
     GEN -->|writes| SITE
     ADMINR -->|copies on Open/regenerate-while-open| CURRENT
@@ -54,16 +53,19 @@ flowchart LR
     ADMINR --> OPENPLAN
     SCHED --> RULES
     LIVES --> LIVEJSON
-    LIVES --> TOKEN
     CURRENT -->|read| PUBLIC
     PUBLIC -->|public traffic| Internet
 ```
 
-The two features are independent: the open/closed state machine controls what the *public
-website* serves, while a projection session controls what the *projector in the room* shows.
-Starting a projection session does not open the public site, and vice versa — projecting lyrics
-in the room during a service is the straightforwardly licensed use, whereas leaving them on a
-public URL is the risk the open/closed toggle exists to manage.
+**`state.txt` gates both public routes.** `/` serves the whole plan's lyrics while open and a
+placeholder while closed; `/live` serves the one currently-live song while open and the same
+placeholder while closed. So there is exactly one switch deciding whether copyrighted lyrics are
+being served at all, and `/live` can only ever be a subset of what `/` is already serving.
+
+The two features are otherwise independent — starting a projection session doesn't open the
+site, and opening the site doesn't start a session — but a session with the site closed
+projects nothing, which the admin screen warns about explicitly so a blank projector is never a
+mystery.
 
 - **`/`** (no auth): read-only, and the only thing it does is return whatever
   `DATA_DIR/current/index.html` currently holds. It has no logic of its own to distinguish
@@ -99,8 +101,7 @@ DATA_DIR/
 ├── state.txt             "open" | "closed" (defaults to closed if missing/malformed)
 ├── open_plan.json        which plan is live right now + who opened it (see OpenPlan below)
 ├── rules.json            configured automation rules + last-evaluated bookkeeping
-├── live_session.json     active projection session, if any (see Live projection below)
-└── display_token.txt     the projector's bearer token
+└── live_session.json     active projection session, if any (see Live projection below)
 ```
 
 `site/` and `current/` are intentionally separate: **regenerate always refreshes `site/`**, but
@@ -213,8 +214,7 @@ logic + JSON persistence with no Flask in it; `live_routes.py` owns the HTTP sur
 
 ```
 DATA_DIR/
-├── live_session.json    active projection session (plan ref, mode, theme)
-└── display_token.txt    the projector's bearer token
+└── live_session.json    active projection session (plan ref, mode, theme)
 ```
 
 **Reading what's live is a two-hop indirection.** The `live` resource doesn't report the
@@ -290,7 +290,7 @@ hook (`@app.before_request`) so every route's answer to "who gets in" is readabl
 | Route | Gate | Write access |
 |---|---|---|
 | `/`, `/healthz` | none | none |
-| `/project/<token>` | token in the URL, checked in-route | **none** — no POST route exists under `/project` |
+| `/live` | nobody — public, but only serves lyrics while the site is open | **none** — no POST route exists under `/live` |
 | `/remote/*` | `ADMIN_PASSWORD`, same realm | drives Planning Center, control mode only |
 | `/admin/*` | `ADMIN_PASSWORD` | everything |
 
@@ -313,18 +313,31 @@ the current design. `tests/test_live_routes.py` asserts both routes advertise th
 string, since that's the thing browsers key their cache on.
 
 Reinstating the privilege split needs **cookie-based login**, where two identities on one origin
-work properly — see the discussion of that migration below. The projector's URL token is
-unaffected either way, and is the one part of this that was right from the start.
+work properly — see the discussion of that migration below. The public `/live` route is
+unaffected either way: it has no credential to collide with.
 
-The projector gets a **token in its URL instead of a password** because it's an unattended
-browser on a booth machine several people can walk up to, with no practical way to log it out
-after a service. The token is rotatable from `/admin/live` (invalidating every existing display
-URL at once), and every route it reaches is a GET, so a leaked link can't advance the plan, take
-Planning Center control, or open the public site. The tradeoff, accepted deliberately: a URL
-token lands in browser history and proxy access logs. That's tolerable for a page whose entire
-content is lyrics the congregation is already looking at — it is **not** a pattern to extend to
-`/admin`. A wrong token returns 404, identical to an unknown URL, so probing can't confirm a
-display URL exists.
+### The projector needs no credential (token removed 2026-07-26)
+
+`/live` shows exactly one song — whichever Services LIVE says is current — and only while
+`state.txt` says open. At any moment it is serving *less* than `/` is already serving to the
+whole internet: same availability window, one song instead of the entire plan. A credential
+guarding a strict subset of already-public data guards nothing, so there isn't one. Being public
+is also what makes it useful past the projector: the congregation can follow the current song on
+their phones from the same URL.
+
+It was originally gated by an unguessable rotatable token, on the reasoning that an unattended
+booth browser shouldn't hold a password. That reasoning was sound about *passwords* and wrong
+about the threat: the content wasn't secret in the first place, and the token bought a URL
+nobody could type or bookmark by hand.
+
+**The part that isn't optional is the gate it hangs on.** Planning Center never clears
+`current_item_time` — confirmed 2026-07-26, hours after a service ended, control released and
+nobody driving, the live resource still reported the last song, and the projector route was
+still serving its lyrics while `/` correctly showed the placeholder. So gating on "a session is
+running" would have quietly reintroduced the all-week exposure this whole app exists to prevent.
+`state.txt` already answers "may lyrics be served right now", so `/live` reuses it, checked
+*before* Planning Center is polled at all (`current_display`) rather than by blanking a response
+after the fact.
 
 Credential comparisons all use `secrets.compare_digest` (constant-time,
 avoids a timing side-channel on the credential comparison). There is **no rate limiting or lockout** on failed attempts —
@@ -366,7 +379,7 @@ login**, which would land three things at once:
    Auth cannot (see above).
 
 The cost is real: a `SECRET_KEY` that must survive restarts (mint it into `DATA_DIR` alongside
-`display_token.txt`, or every container restart logs everyone out), plus cookies and login/logout
+`live_session.json`, or every container restart logs everyone out), plus cookies and login/logout
 routes in an app that currently holds no client-side state at all. The two roles also want
 different session lifetimes — weeks for a phone used every Sunday, short for admin.
 

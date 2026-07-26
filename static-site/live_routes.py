@@ -5,13 +5,15 @@ live_routes.py
 The HTTP surface of the live projection feature -- three route groups that
 admin_app.py mounts into its single Flask app:
 
-    /project/<token>   the projector. Token in the URL, read-only, no
-                       password. See live_session.py for why.
+    /live              the projector -- and anyone's phone. Public, but only
+                       serves lyrics while the public site is open, so it is
+                       strictly a subset of what "/" already serves. See
+                       live_session.py for why it needs no credential.
     /remote/*          the operator's controller. Behind ADMIN_PASSWORD, the
                        same credential as /admin -- see admin_app._require_auth
                        for why this isn't a separate one.
     /admin/live/*      pick a plan, start/stop a session, take or release
-                       Planning Center control, rotate the display token.
+                       Planning Center control.
                        Covered by admin_app's existing /admin Basic Auth.
 
 Decisions live in live_session.py (pure, tested); this module does I/O,
@@ -40,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 from flask import Blueprint, Flask, Response, jsonify, redirect, request, url_for
@@ -51,13 +53,9 @@ from live_session import (
     LiveSessionState,
     PlanCache,
     clear_session,
-    ensure_display_token,
-    read_display_token,
     read_session,
     resolve_display,
-    rotate_display_token,
     steps_between,
-    token_matches,
     write_session,
 )
 from pco_client import (
@@ -102,6 +100,10 @@ class LiveContext:
     data_dir: Path
     session: requests.Session
     lock: threading.Lock
+    # Returns True when the public site is open. Injected rather than
+    # imported: admin_app owns the open/closed concept (state.txt), and
+    # importing it here would be circular.
+    site_is_open: Callable[[], bool]
 
 
 _ctx: Optional[LiveContext] = None
@@ -199,6 +201,11 @@ def poll_live(session_state: LiveSessionState, force: bool = False) -> LiveStatu
 
 def current_display(session_state: Optional[LiveSessionState]) -> tuple[DisplayState, Optional[LiveStatus]]:
     """The projector's current frame, plus the raw live status behind it."""
+    if not ctx().site_is_open():
+        # No lyrics may be served at all right now. Checked before anything
+        # else -- including before a Planning Center poll -- so a closed site
+        # can't leak a song through this route no matter what LIVE reports.
+        return DisplayState(status="closed", note="The site is closed."), None
     if session_state is None:
         return DisplayState(status="waiting", note="No projection session is running."), None
     try:
@@ -225,33 +232,19 @@ def _display_json(state: DisplayState, session_state: Optional[LiveSessionState]
 
 
 # --------------------------------------------------------------------------
-# /project/<token> -- the projector. Read-only by construction.
+# /live -- the projector, and anyone's phone. Public, read-only.
 # --------------------------------------------------------------------------
 
-project_bp = Blueprint("project", __name__, url_prefix="/project")
+live_bp = Blueprint("live", __name__, url_prefix="/live")
 
 
-def _reject_bad_token(token: str) -> Optional[Response]:
-    if not token_matches(ctx().data_dir, token):
-        # Deliberately identical to what an unknown URL returns: a wrong
-        # token should not be distinguishable from a nonexistent page.
-        return Response("Not found", 404)
-    return None
+@live_bp.route("/")
+def display_page():
+    return _DISPLAY_HTML.replace("__STATE_URL__", url_for("live.display_state"))
 
 
-@project_bp.route("/<token>")
-def display_page(token: str):
-    rejection = _reject_bad_token(token)
-    if rejection:
-        return rejection
-    return _DISPLAY_HTML.replace("__STATE_URL__", url_for("project.display_state", token=token))
-
-
-@project_bp.route("/<token>/state.json")
-def display_state(token: str):
-    rejection = _reject_bad_token(token)
-    if rejection:
-        return rejection
+@live_bp.route("/state.json")
+def display_state():
     session_state = read_session(ctx().data_dir)
     state, _ = current_display(session_state)
     return jsonify(_display_json(state, session_state))
@@ -456,8 +449,7 @@ def live_index():
         )
     else:
         state, live = current_display(session_state)
-        token = ensure_display_token(ctx().data_dir)
-        display_url = url_for("project.display_page", token=token, _external=True)
+        display_url = url_for("live.display_page", _external=True)
         in_control = bool(live and live.holds_control)
         controller = (live.controller_name if live else None) or "nobody"
 
@@ -476,8 +468,14 @@ def live_index():
             ),
             remote_url=url_for("remote.remote_page"),
             stop_url=url_for("admin_live.stop"),
-            rotate_url=url_for("admin_live.rotate"),
             reload_url=url_for("admin_live.reload_plan"),
+            closed_warning=(
+                ""
+                if ctx().site_is_open()
+                else '<div class="warn">The site is currently <strong>closed</strong>, so the '
+                "projector shows the &ldquo;come back Sunday&rdquo; placeholder rather than "
+                "lyrics. Open it from the status page to start projecting.</div>"
+            ),
         )
 
     return _LIVE_PAGE_TEMPLATE.format(
@@ -516,7 +514,6 @@ def start():
     drop_plan_cache()
     with ctx().lock:
         write_session(ctx().data_dir, session_state)
-    ensure_display_token(ctx().data_dir)
 
     try:
         load_plan_cache(session_state, force=True)
@@ -581,14 +578,6 @@ def release():
         session_state.mode = "follow"
         write_session(ctx().data_dir, session_state)
     return redirect(url_for("admin_live.live_index", notice="Control released. Back to follow mode."))
-
-
-@admin_live_bp.route("/rotate", methods=["POST"])
-def rotate():
-    rotate_display_token(ctx().data_dir)
-    return redirect(
-        url_for("admin_live.live_index", notice="Display token rotated -- reopen the projector on its new URL.")
-    )
 
 
 @admin_live_bp.route("/reload", methods=["POST"])
@@ -685,6 +674,12 @@ async function poll() {
   } else if (data.status === 'hold') {
     // A non-song item is live (sermon, offering). Blank, not stale lyrics.
     show('');
+  } else if (data.status === 'closed') {
+    // Site closed: no lyrics may be served. Same message the front page
+    // shows, so a phone bookmarked on this URL reads sensibly all week.
+    show('');
+    document.getElementById('idle').textContent =
+      'Sidan visas bara under gudstjänsten.';
   } else {
     show('');
     document.getElementById('idle').textContent = data.plan_title || '';
@@ -906,11 +901,12 @@ _LIVE_ACTIVE_TEMPLATE = """<p><span class="badge {mode_class}">{mode} mode</span
 Planning Center control: {controller}<br>
 Theme: {theme} (flip it from the remote)</p>
 
-<h2>Projector</h2>
-<p class="meta">Open this on the projector machine. It needs no password and cannot
-control anything &mdash; but treat the link as the secret it is.</p>
+<h2>Projector &amp; phones</h2>
+<p class="meta">Public, no password &mdash; it only ever shows the one song Planning Center
+has live, and only while the site is open, so it shows strictly less than the front page
+already does. Congregation can open it on their phones.</p>
 <p><code>{display_url}</code></p>
-<form method="post" action="{rotate_url}"><button>Rotate display link</button></form>
+{closed_warning}
 
 <h2>Remote</h2>
 <p class="meta"><a href="{remote_url}">Open the remote &rarr;</a> (same login as this page)</p>
@@ -944,6 +940,6 @@ so the remote can drive the plan.</p>
 def init_app(app: Flask, context: LiveContext) -> None:
     global _ctx
     _ctx = context
-    app.register_blueprint(project_bp)
+    app.register_blueprint(live_bp)
     app.register_blueprint(remote_bp)
     app.register_blueprint(admin_live_bp)

@@ -173,20 +173,28 @@ projector + remote for an actual service, synced to Planning Center's own
 **Services LIVE** session. Pick a service type and a plan, start a session,
 and you get two URLs:
 
-- **the projector** (`/project/<token>`) -- full-screen lyrics for whatever
-  item Services LIVE currently has open. No password: it authenticates with
-  a long random token in its own URL, rotatable from the admin screen. It is
-  read-only, so a leaked link can't control anything.
+- **the projector** (`/live`) -- full-screen lyrics for whatever item
+  Services LIVE currently has open. Public and read-only, so the
+  congregation can follow along on their phones from the same URL. It serves
+  lyrics **only while the public site is open**, which makes it strictly less
+  than what `/` is already showing at that moment: same window, one song
+  instead of the whole plan.
 - **the remote** (`/remote`) -- Prev/Next, tap-a-song-to-jump, and a
   black-on-white / white-on-black toggle for the projector. Uses the same
   `ADMIN_USERNAME`/`ADMIN_PASSWORD` as the admin UI.
 
 | Route | Who gets in | Can it write? |
 |---|---|---|
-| `/` | anyone | no |
-| `/project/<token>` | anyone with the link | no -- read-only by construction |
+| `/` | anyone (all songs, only while open) | no |
+| `/live` | anyone (current song, only while open) | no -- read-only by construction |
 | `/remote` | `ADMIN_PASSWORD` | drives the plan, only in control mode |
 | `/admin/*` | `ADMIN_PASSWORD` | everything |
+
+Both public routes answer to the same open/closed switch, so there's one
+place that decides whether copyrighted lyrics are being served at all.
+When the site is closed, `/live` shows the same "come back Sunday"
+placeholder `/` does -- which is also what a phone bookmarked on it sees
+during the week.
 
 > [!NOTE]
 > The remote had its own password at first, so that whoever runs a service

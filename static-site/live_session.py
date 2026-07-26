@@ -3,8 +3,8 @@
 live_session.py
 
 State + pure logic behind the live projection feature: which plan is being
-projected, what the projector should have on screen at this instant, the
-display's access token, and the light/dark theme.
+projected, what the projector should have on screen at this instant, and the
+light/dark theme.
 
 Like scheduler.py, this module deliberately has **no Flask, HTTP, or
 threading** in it -- just dataclasses, JSON persistence, and one decision
@@ -15,29 +15,31 @@ or network (tests/test_live_session.py).
 
 Persisted on the same DATA_DIR volume admin_app.py already uses:
     <DATA_DIR>/live_session.json   the active projection session, if any
-    <DATA_DIR>/display_token.txt   the projector's bearer token (see below)
 
-## Why the display gets a token instead of a password
+## Why the projector view needs no credential at all
 
-The projector browser is unattended, usually on a machine in an AV booth
-that several people can walk up to, and there's no practical way to "log it
-out" after a service. Giving it the admin password would mean the booth
-machine holds the credential that controls whether copyrighted lyrics are
-served to the public internet. Instead it gets a long random token embedded
-in its URL, which:
+It shows one song -- whichever Planning Center says is live right now --
+and it is served **only while the public site is open**, the same
+`state.txt` gate `/` already uses. That makes it strictly less than what `/`
+is already serving to anyone on the internet at that moment: same
+availability window, one song instead of the whole plan. A credential
+protecting a strict subset of already-public data protects nothing.
 
-  - is read-only by construction -- every route reachable with it is a GET
-    that renders or reports state, so a compromised display can't advance
-    the plan, take Planning Center control, or open the public site;
-  - can be rotated from the admin screen the moment a laptop goes missing,
-    without touching anyone else's access;
-  - survives being bookmarked on a device with no keyboard.
+Being public is also what makes it useful beyond the projector: the
+congregation can follow the current song on their phones from the same URL.
 
-The tradeoff, worth being explicit about: a URL token lands in browser
-history and any reverse-proxy access log that records query-free paths. That
-is an accepted risk for a page whose entire content is song lyrics the
-congregation is looking at anyway -- it is *not* a pattern to copy for the
-admin routes, which stay behind a password.
+This deliberately hangs off the open/closed state rather than off "is a
+session running", because **Planning Center never clears
+`current_item_time`**. Confirmed 2026-07-26: hours after a service ended,
+with control released and nobody driving, the live resource still reported
+the last song. A session left running would therefore serve that song's
+lyrics indefinitely -- exactly the all-week exposure the open/closed
+machinery exists to prevent. `state.txt` is the gate that already has an
+answer for when lyrics may be served, so it's the one to reuse.
+
+An earlier version gated this with an unguessable token in the URL. That
+was removed as protection that bought nothing while costing a URL nobody
+could type -- see ARCHITECTURE.md for the full reasoning.
 """
 
 from __future__ import annotations
@@ -45,7 +47,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
@@ -54,10 +55,6 @@ from pco_client import LiveStatus, PlanItem, SongLyrics
 
 log = logging.getLogger("live_session")
 
-# Long enough that online guessing is hopeless even with no rate limiting in
-# front of it (the app deliberately has none -- see ARCHITECTURE.md "Auth").
-DISPLAY_TOKEN_BYTES = 32
-
 Theme = Literal["dark", "light"]
 Mode = Literal["follow", "control"]
 
@@ -65,54 +62,6 @@ Mode = Literal["follow", "control"]
 # what the previous proof of concept did; "light" exists for bright rooms and
 # for projectors whose blacks wash out to grey anyway.
 DEFAULT_THEME: Theme = "dark"
-
-
-# --------------------------------------------------------------------------
-# Display token (persisted at <DATA_DIR>/display_token.txt)
-# --------------------------------------------------------------------------
-
-
-def _token_path(data_dir: Path) -> Path:
-    return data_dir / "display_token.txt"
-
-
-def read_display_token(data_dir: Path) -> Optional[str]:
-    path = _token_path(data_dir)
-    if not path.exists():
-        return None
-    token = path.read_text(encoding="utf-8").strip()
-    return token or None
-
-
-def ensure_display_token(data_dir: Path) -> str:
-    """Return the display token, minting one on first use."""
-    existing = read_display_token(data_dir)
-    if existing:
-        return existing
-    return rotate_display_token(data_dir)
-
-
-def rotate_display_token(data_dir: Path) -> str:
-    """Mint a fresh display token, invalidating every existing display URL."""
-    token = secrets.token_urlsafe(DISPLAY_TOKEN_BYTES)
-    path = _token_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".txt.tmp")
-    tmp_path.write_text(token, encoding="utf-8")
-    os.replace(tmp_path, path)
-    return token
-
-
-def token_matches(data_dir: Path, candidate: str) -> bool:
-    """Constant-time comparison of a presented token against the stored one.
-
-    Mirrors the constant-time credential check admin_app._require_auth already
-    uses -- same reasoning, same lack of rate limiting behind it.
-    """
-    stored = read_display_token(data_dir)
-    if not stored or not candidate:
-        return False
-    return secrets.compare_digest(stored, candidate)
 
 
 # --------------------------------------------------------------------------
@@ -213,7 +162,7 @@ class PlanCache:
 # The decision: what is on the projector right now?
 # --------------------------------------------------------------------------
 
-DisplayStatus = Literal["waiting", "song", "hold", "stale"]
+DisplayStatus = Literal["waiting", "song", "hold", "stale", "closed"]
 
 
 @dataclass
@@ -231,6 +180,9 @@ class DisplayState:
       - "stale": Planning Center is unreachable, or reports an item this
         cache has never heard of (the plan was edited mid-service). Keep the
         last frame rather than blanking; surface the problem on the remote.
+      - "closed": the public site is closed, so no lyrics may be served at
+        all. Decided by the caller (live_routes) before resolve_display is
+        ever reached, since this module has no notion of state.txt.
     """
 
     status: DisplayStatus

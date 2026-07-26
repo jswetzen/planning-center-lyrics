@@ -17,12 +17,9 @@ from live_session import (
     LiveSessionState,
     PlanCache,
     clear_session,
-    ensure_display_token,
     read_session,
     resolve_display,
-    rotate_display_token,
     steps_between,
-    token_matches,
     write_session,
 )
 from pco_client import LiveStatus, PlanItem, SongLyrics
@@ -138,31 +135,6 @@ def test_steps_between_is_zero_for_the_same_item(cache):
 def test_steps_between_unknown_item_is_none(cache):
     assert steps_between(cache, "i3", "nope") is None
     assert steps_between(cache, None, "i3") is None
-
-
-# --------------------------------------------------------------------------
-# Display token
-# --------------------------------------------------------------------------
-
-
-def test_token_is_minted_once_and_reused(tmp_path):
-    first = ensure_display_token(tmp_path)
-    assert ensure_display_token(tmp_path) == first
-    assert len(first) > 30
-
-
-def test_rotating_invalidates_the_old_token(tmp_path):
-    old = ensure_display_token(tmp_path)
-    new = rotate_display_token(tmp_path)
-    assert new != old
-    assert token_matches(tmp_path, new)
-    assert not token_matches(tmp_path, old)
-
-
-def test_token_match_rejects_empty_and_missing(tmp_path):
-    assert not token_matches(tmp_path, "anything")  # nothing stored yet
-    ensure_display_token(tmp_path)
-    assert not token_matches(tmp_path, "")
 
 
 # --------------------------------------------------------------------------

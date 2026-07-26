@@ -53,10 +53,17 @@ def client(tmp_path, monkeypatch, cache):
     monkeypatch.setattr(admin_app, "DATA_DIR", tmp_path)
     monkeypatch.setattr(admin_app, "ADMIN_PASSWORD", ADMIN_PW)
     monkeypatch.setattr(admin_app, "ADMIN_USERNAME", "admin")
+    # Default to an OPEN site; tests that care flip it via client.set_open().
+    open_flag = {"open": True}
     monkeypatch.setattr(
         live_routes,
         "_ctx",
-        live_routes.LiveContext(data_dir=tmp_path, session=None, lock=admin_app._lock),
+        live_routes.LiveContext(
+            data_dir=tmp_path,
+            session=None,
+            lock=admin_app._lock,
+            site_is_open=lambda: open_flag["open"],
+        ),
     )
     monkeypatch.setattr(live_routes, "load_plan_cache", lambda s, force=False: cache)
     monkeypatch.setattr(live_routes, "cache_for", lambda s: cache if s else None)
@@ -73,6 +80,7 @@ def client(tmp_path, monkeypatch, cache):
     admin_app.app.config["TESTING"] = True
     with admin_app.app.test_client() as c:
         c.data_dir = tmp_path
+        c.set_open = lambda value: open_flag.__setitem__("open", value)
         yield c
 
 
@@ -145,43 +153,66 @@ def test_remote_write_routes_are_gated_too(client):
 
 
 # --------------------------------------------------------------------------
-# The display token
+# The public /live route, and the open/closed gate that is its only protection
 # --------------------------------------------------------------------------
 
 
-def test_display_needs_a_valid_token(client):
-    live_session.ensure_display_token(client.data_dir)
-    assert client.get("/project/wrong-token").status_code == 404
+def test_live_view_is_public(client):
+    """No credential: it shows one song, only while the site is open, so it is
+    strictly less than what "/" is already serving at that moment."""
+    assert client.get("/live/").status_code == 200
+    assert client.get("/live/state.json").status_code == 200
 
 
-def test_display_opens_with_the_right_token_and_no_password(client):
-    token = live_session.ensure_display_token(client.data_dir)
-    assert client.get(f"/project/{token}").status_code == 200
+def test_live_view_serves_lyrics_while_the_site_is_open(client):
+    _start_session(client)
+    client.set_open(True)
+    body = client.get("/live/state.json").get_json()
+    assert body["status"] == "song"
+    assert body["lyrics"] == "lyrics A"
 
 
-def test_bad_token_is_indistinguishable_from_a_missing_page(client):
-    """A wrong token returns exactly what an unknown URL does, so probing
-    can't confirm that a display URL exists at all."""
-    live_session.ensure_display_token(client.data_dir)
-    assert client.get("/project/wrong-token").status_code == client.get("/project/").status_code == 404
+def test_closed_site_serves_no_lyrics(client):
+    """The gate that replaced the token. A closed site must not leak a song
+    through this route, whatever Planning Center reports."""
+    _start_session(client)
+    client.set_open(False)
+    body = client.get("/live/state.json").get_json()
+    assert body["status"] == "closed"
+    assert body["lyrics"] == ""
+    assert body["title"] == ""
 
 
-def test_rotating_the_token_invalidates_the_old_display_url(client):
-    old = live_session.ensure_display_token(client.data_dir)
-    assert client.get(f"/project/{old}").status_code == 200
+def test_closed_gate_is_checked_before_planning_center_is_polled(client, monkeypatch):
+    """Not just a blanked response -- a closed site shouldn't even ask PCO
+    what's live, so there is no window where a poll result could be rendered."""
+    _start_session(client)
+    client.set_open(False)
+    polled = []
+    monkeypatch.setattr(
+        live_routes, "poll_live", lambda s, force=False: polled.append(1) or LiveStatus(current_item_id="i2")
+    )
 
-    client.post("/admin/live/rotate", headers=ADMIN_HEADERS)
-    assert client.get(f"/project/{old}").status_code == 404
-    new = live_session.read_display_token(client.data_dir)
-    assert client.get(f"/project/{new}").status_code == 200
+    client.get("/live/state.json")
+    assert polled == []
 
 
-def test_display_token_grants_no_write_access(client):
-    """The projector is read-only by construction -- there is no POST route
-    under /project at all, so a leaked display link can't drive anything."""
-    token = live_session.ensure_display_token(client.data_dir)
-    for path in (f"/project/{token}", f"/project/{token}/state.json"):
+def test_closed_gate_applies_with_no_session_too(client):
+    client.set_open(False)
+    assert client.get("/live/state.json").get_json()["status"] == "closed"
+
+
+def test_live_view_has_no_write_routes(client):
+    """Public and read-only: there is no POST under /live at all."""
+    for path in ("/live/", "/live/state.json"):
         assert client.post(path).status_code == 405, path
+
+
+def test_remote_also_reports_the_closed_state(client):
+    """So the operator can see *why* the projector is blank."""
+    _start_session(client)
+    client.set_open(False)
+    assert client.get("/remote/state.json", headers=ADMIN_HEADERS).get_json()["status"] == "closed"
 
 
 # --------------------------------------------------------------------------
@@ -191,9 +222,8 @@ def test_display_token_grants_no_write_access(client):
 
 def test_display_state_reports_the_live_song(client):
     _start_session(client)
-    token = live_session.ensure_display_token(client.data_dir)
 
-    body = client.get(f"/project/{token}/state.json").get_json()
+    body = client.get("/live/state.json").get_json()
     assert body["status"] == "song"
     assert body["lyrics"] == "lyrics A"
     assert body["theme"] == "dark"
@@ -202,16 +232,14 @@ def test_display_state_reports_the_live_song(client):
 def test_display_state_blanks_on_a_non_song_item(client, monkeypatch):
     _start_session(client)
     monkeypatch.setattr(live_routes, "poll_live", lambda s, force=False: LiveStatus(current_item_id="i3"))
-    token = live_session.ensure_display_token(client.data_dir)
 
-    body = client.get(f"/project/{token}/state.json").get_json()
+    body = client.get("/live/state.json").get_json()
     assert body["status"] == "hold"
     assert body["lyrics"] == ""
 
 
 def test_display_state_without_a_session_waits(client):
-    token = live_session.ensure_display_token(client.data_dir)
-    body = client.get(f"/project/{token}/state.json").get_json()
+    body = client.get("/live/state.json").get_json()
     assert body["status"] == "waiting"
 
 
@@ -336,10 +364,9 @@ def test_goto_refuses_a_jump_beyond_the_step_cap(client, monkeypatch):
 
 def test_theme_toggles_between_dark_and_light(client):
     _start_session(client)
-    token = live_session.ensure_display_token(client.data_dir)
 
     assert client.post("/remote/theme", headers=REMOTE_HEADERS).get_json()["theme"] == "light"
-    assert client.get(f"/project/{token}/state.json").get_json()["theme"] == "light"
+    assert client.get("/live/state.json").get_json()["theme"] == "light"
     assert client.post("/remote/theme", headers=REMOTE_HEADERS).get_json()["theme"] == "dark"
 
 
@@ -401,11 +428,24 @@ def test_active_page_renders_in_control_mode(client, monkeypatch):
     assert b"Take control" not in res.data
 
 
-def test_active_page_shows_the_display_url(client):
+def test_active_page_shows_the_public_display_url(client):
     _start_session(client)
-    token = live_session.ensure_display_token(client.data_dir)
     res = client.get("/admin/live/", headers=ADMIN_HEADERS)
-    assert token.encode() in res.data
+    assert b"/live/" in res.data
+
+
+def test_active_page_warns_when_the_site_is_closed(client):
+    """Otherwise you start a session, the projector is blank, and nothing
+    tells you the site being closed is the reason."""
+    _start_session(client)
+    client.set_open(False)
+    res = client.get("/admin/live/", headers=ADMIN_HEADERS)
+    assert b"currently <strong>closed</strong>" in res.data
+
+    client.set_open(True)
+    assert b"currently <strong>closed</strong>" not in client.get(
+        "/admin/live/", headers=ADMIN_HEADERS
+    ).data
 
 
 def test_admin_status_page_links_to_the_live_console(client):

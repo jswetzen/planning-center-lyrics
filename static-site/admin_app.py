@@ -122,14 +122,9 @@ _lock = threading.Lock()
 def _require_auth():
     """The app's single authentication gate -- every route's answer in one place.
 
-        /admin/*     ADMIN_PASSWORD. Can serve copyrighted lyrics publicly and
-                     can take over Planning Center's live session.
-        /remote/*    REMOTE_PASSWORD, a *separate* credential: the person
-                     running a service from the back of the room shouldn't
-                     need (or hold) the key to the public site. 503s until
-                     it's configured, so an unset password can never mean
-                     "open". ADMIN_PASSWORD is also accepted here -- see
-                     below.
+        /admin/*     ADMIN_PASSWORD.
+        /remote/*    ADMIN_PASSWORD, the same credential and the same Basic
+                     Auth realm -- deliberately, see below.
         /project/*   No password. Gated by the unguessable token in its own
                      URL, checked inside the route (live_routes) because the
                      token is a path segment rather than a header. Read-only
@@ -137,22 +132,25 @@ def _require_auth():
                      for why the projector gets a token instead of a password.
         everything   "/" (the public page or placeholder) and "/healthz" are
         else         deliberately open.
+
+    **Why /remote isn't a second credential.** It was one, briefly, on the
+    reasoning that whoever runs a service from the back of the room shouldn't
+    hold the key to the public site. That failed in practice: browsers cache
+    HTTP Basic Auth per *origin*, so a browser that had ever seen the remote
+    realm kept preemptively re-sending those credentials to every path on the
+    host, and the admin password appeared to be rejected no matter how many
+    times it was typed (observed 2026-07-26: six consecutive 401s on /remote
+    from a browser whose user was entering the correct admin password). Two
+    Basic Auth identities on one origin is not something a browser will hold
+    cleanly.
+
+    One credential and one realm removes the ambiguity outright. The
+    least-privilege split is worth revisiting if this ever moves to
+    cookie-based login, where two identities on one origin actually work --
+    the projector's token is unaffected either way.
     """
     path = request.path
-    if path.startswith("/remote"):
-        # Admin credentials open the remote too. Not a convenience shortcut:
-        # HTTP Basic Auth is cached per *origin* by browsers, so once someone
-        # has logged into /admin, their browser preemptively sends those
-        # credentials to /remote on the same host -- and rejecting them there
-        # produced a login box that appears to fail no matter what you type.
-        # Allowing them costs nothing, since the admin credential can already
-        # start sessions and take Planning Center control; the direction that
-        # matters (REMOTE_PASSWORD must not reach /admin) is still enforced
-        # below.
-        if _is_admin(request.authorization):
-            return
-        return live_routes.remote_auth_error()
-    if not path.startswith("/admin"):
+    if not path.startswith("/admin") and not path.startswith("/remote"):
         return
     if not _is_admin(request.authorization):
         return Response(

@@ -7,9 +7,9 @@ admin_app.py mounts into its single Flask app:
 
     /project/<token>   the projector. Token in the URL, read-only, no
                        password. See live_session.py for why.
-    /remote/*          the operator's controller. Its own password
-                       (REMOTE_USERNAME/REMOTE_PASSWORD), separate from the
-                       admin credential.
+    /remote/*          the operator's controller. Behind ADMIN_PASSWORD, the
+                       same credential as /admin -- see admin_app._require_auth
+                       for why this isn't a separate one.
     /admin/live/*      pick a plan, start/stop a session, take or release
                        Planning Center control, rotate the display token.
                        Covered by admin_app's existing /admin Basic Auth.
@@ -34,8 +34,6 @@ implicit, never on a timer, and never a side effect of opening a page.
 from __future__ import annotations
 
 import logging
-import os
-import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -79,9 +77,6 @@ from pco_client import (
 )
 
 log = logging.getLogger("live_routes")
-
-REMOTE_USERNAME = os.environ.get("REMOTE_USERNAME", "remote")
-REMOTE_PASSWORD = os.environ.get("REMOTE_PASSWORD")
 
 # How long a Planning Center live-status read is reused across callers.
 #
@@ -267,27 +262,6 @@ def display_state(token: str):
 # --------------------------------------------------------------------------
 
 remote_bp = Blueprint("remote", __name__, url_prefix="/remote")
-
-
-def remote_auth_error() -> Optional[Response]:
-    """Check the remote credential. Returns a response to send, or None to proceed.
-
-    Called from admin_app's before_request hook rather than a decorator so
-    that all of this app's authentication decisions stay visible in one place.
-    """
-    if not REMOTE_PASSWORD:
-        return Response(
-            "The remote is not configured. Set REMOTE_PASSWORD (see .env.example) to enable it.",
-            503,
-        )
-    auth = request.authorization
-    if (
-        not auth
-        or not secrets.compare_digest(auth.username or "", REMOTE_USERNAME)
-        or not secrets.compare_digest(auth.password or "", REMOTE_PASSWORD)
-    ):
-        return Response("Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="remote"'})
-    return None
 
 
 @remote_bp.route("/")
@@ -939,8 +913,7 @@ control anything &mdash; but treat the link as the secret it is.</p>
 <form method="post" action="{rotate_url}"><button>Rotate display link</button></form>
 
 <h2>Remote</h2>
-<p class="meta"><a href="{remote_url}">Open the remote &rarr;</a> (separate password:
-<code>REMOTE_USERNAME</code>/<code>REMOTE_PASSWORD</code>)</p>
+<p class="meta"><a href="{remote_url}">Open the remote &rarr;</a> (same login as this page)</p>
 
 <h2>Control</h2>
 {control_button}

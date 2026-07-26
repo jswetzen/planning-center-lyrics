@@ -291,21 +291,30 @@ hook (`@app.before_request`) so every route's answer to "who gets in" is readabl
 |---|---|---|
 | `/`, `/healthz` | none | none |
 | `/project/<token>` | token in the URL, checked in-route | **none** — no POST route exists under `/project` |
-| `/remote/*` | `REMOTE_PASSWORD` **or** `ADMIN_PASSWORD` | drives Planning Center, control mode only |
-| `/admin/*` | `ADMIN_PASSWORD` only | everything |
+| `/remote/*` | `ADMIN_PASSWORD`, same realm | drives Planning Center, control mode only |
+| `/admin/*` | `ADMIN_PASSWORD` | everything |
 
-`/remote` gets its own password rather than reusing the admin one because the person running a
-service from the back of the room shouldn't hold the credential that can publish copyrighted
-lyrics to the internet. An unset `REMOTE_PASSWORD` makes `/remote` return **503, not open** —
-missing config must never mean "no auth required".
+### Why `/remote` isn't a second credential (tried and reverted, 2026-07-26)
 
-The gate is deliberately **asymmetric**: the admin credential also opens `/remote`, but the
-remote credential never opens `/admin`. Browsers cache HTTP Basic Auth per *origin*, so a
-browser already authenticated to `/admin` preemptively sends those credentials to `/remote` on
-the same host — and rejecting them there produced a login box that appeared to fail no matter
-what was typed (reported 2026-07-26). Accepting them costs nothing, since the admin credential
-can already start sessions and take Planning Center control; the direction that carries the
-actual security property is the one still enforced.
+It was one, on the reasonable-sounding principle that whoever runs a service from the back of
+the room shouldn't hold the credential that can publish copyrighted lyrics to the internet.
+That principle is still right; HTTP Basic Auth just can't express it on a single origin.
+
+Browsers cache Basic Auth credentials **per origin, not per path or per realm**, and re-send
+them preemptively to every path on that host. Once a browser had seen the `remote` realm, it
+kept attaching those credentials to `/admin` requests and vice versa. Observed against a real
+browser: six consecutive 401s on `/remote` while the user was entering the correct admin
+password, because the browser kept overriding it with the cached remote credentials. An
+intermediate fix (accept *either* credential on `/remote`) didn't help — the browser was
+sending stale credentials, not no credentials.
+
+One credential and one realm (`Basic realm="admin"`) removes the ambiguity outright, which is
+the current design. `tests/test_live_routes.py` asserts both routes advertise the *same* realm
+string, since that's the thing browsers key their cache on.
+
+Reinstating the privilege split needs **cookie-based login**, where two identities on one origin
+work properly — see the discussion of that migration below. The projector's URL token is
+unaffected either way, and is the one part of this that was right from the start.
 
 The projector gets a **token in its URL instead of a password** because it's an unattended
 browser on a booth machine several people can walk up to, with no practical way to log it out
@@ -333,6 +342,33 @@ restriction (LAN-only, IP allowlist) backing it up unless the deployment adds on
 proxy. That's an accepted tradeoff here: the content this whole app protects is CCLI-licensed
 lyrics, not sensitive data, so the admin UI needing to be reachable from outside the LAN mattered
 more than keeping a second layer of network-level isolation on top of the password.
+
+### Known gap: no CSRF protection, and why that's tied to Basic Auth
+
+There are 17 state-changing `POST` routes (open/close the public site, start/stop a projection
+session, take Planning Center control, edit automation rules) and **no CSRF tokens**. Basic Auth
+provides no defence here: browsers attach cached credentials to any request aimed at that origin,
+including a cross-site form POST from an attacker's page. An admin who is logged in and then
+visits a hostile page could have the public site toggled, a session stopped, or LIVE control
+taken mid-service. The app is internet-exposed (Traefik), so this isn't purely theoretical —
+it's accepted for now because the blast radius is a lyrics site, not because it's safe.
+
+This can't be fixed cleanly *without* moving off Basic Auth: a CSRF token has to be bound to a
+session, and Basic Auth has no session to bind to. So the natural fix is a **cookie-based
+login**, which would land three things at once:
+
+1. `SameSite=Lax` session cookies, which browsers simply don't send on cross-site POSTs —
+   removing the whole class — plus per-form tokens for defence in depth.
+2. A **logout**, which Basic Auth cannot offer. This matters most for the remote: it's meant to
+   run on a volunteer's phone, which currently keeps the credential indefinitely with no
+   revocation short of changing the password for everyone.
+3. The `/admin` vs `/remote` privilege split, which cookies can express on one origin and Basic
+   Auth cannot (see above).
+
+The cost is real: a `SECRET_KEY` that must survive restarts (mint it into `DATA_DIR` alongside
+`display_token.txt`, or every container restart logs everyone out), plus cookies and login/logout
+routes in an app that currently holds no client-side state at all. The two roles also want
+different session lifetimes — weeks for a phone used every Sunday, short for admin.
 
 ## `pco_client` (`src/pco_client/`)
 

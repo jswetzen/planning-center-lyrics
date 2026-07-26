@@ -178,23 +178,24 @@ and you get two URLs:
   a long random token in its own URL, rotatable from the admin screen. It is
   read-only, so a leaked link can't control anything.
 - **the remote** (`/remote`) -- Prev/Next, tap-a-song-to-jump, and a
-  black-on-white / white-on-black toggle for the projector. Gated by its own
-  `REMOTE_USERNAME`/`REMOTE_PASSWORD` (see `.env.example`), **separate from
-  the admin password** -- the person running the service doesn't need the
-  credential that can publish lyrics publicly.
-
-Three credentials, three different jobs:
+  black-on-white / white-on-black toggle for the projector. Uses the same
+  `ADMIN_USERNAME`/`ADMIN_PASSWORD` as the admin UI.
 
 | Route | Who gets in | Can it write? |
 |---|---|---|
 | `/` | anyone | no |
 | `/project/<token>` | anyone with the link | no -- read-only by construction |
-| `/remote` | `REMOTE_PASSWORD` (or `ADMIN_PASSWORD`) | drives the plan, only in control mode |
-| `/admin/*` | `ADMIN_PASSWORD` only | everything |
+| `/remote` | `ADMIN_PASSWORD` | drives the plan, only in control mode |
+| `/admin/*` | `ADMIN_PASSWORD` | everything |
 
-The admin password also opens `/remote` — browsers cache Basic Auth per host, so a browser
-already logged into `/admin` would otherwise hit a login box it could never satisfy. The
-direction that matters is still enforced: `REMOTE_PASSWORD` cannot reach `/admin`.
+> [!NOTE]
+> The remote had its own password at first, so that whoever runs a service
+> wouldn't hold the key to the public site. It was removed because browsers
+> cache HTTP Basic Auth **per host, not per path**: a browser that had seen
+> the remote's login kept re-sending it to every other page on the same host,
+> and the admin password looked rejected no matter how often it was typed.
+> Two Basic Auth logins on one host is not something a browser handles
+> cleanly. Splitting the roles again would need cookie-based login instead.
 
 #### Follow mode vs. control mode
 

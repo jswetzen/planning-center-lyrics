@@ -3,9 +3,9 @@ Route-level tests for the live projection feature, driven through Flask's
 test client against a temp DATA_DIR with Planning Center monkeypatched out.
 
 The bulk of this file is the authentication boundary, because that's the part
-where a mistake is both easy to make and expensive: three route groups now
-share one process, each with a different answer to "who can reach this", and
-the projector deliberately gets in without a password.
+where a mistake is both easy to make and expensive: three route groups share
+one process, and the projector deliberately gets in without a password while
+everything else needs the admin credential.
 """
 
 import base64
@@ -19,7 +19,6 @@ from live_session import LiveSessionState, PlanCache
 from pco_client import LiveStatus, PlanItem, SongLyrics
 
 ADMIN_PW = "admin-pw"
-REMOTE_PW = "remote-pw"
 
 
 def _auth(username, password):
@@ -28,7 +27,8 @@ def _auth(username, password):
 
 
 ADMIN_HEADERS = _auth("admin", ADMIN_PW)
-REMOTE_HEADERS = _auth("remote", REMOTE_PW)
+# The remote shares the admin credential -- see admin_app._require_auth.
+REMOTE_HEADERS = ADMIN_HEADERS
 
 
 @pytest.fixture
@@ -53,8 +53,6 @@ def client(tmp_path, monkeypatch, cache):
     monkeypatch.setattr(admin_app, "DATA_DIR", tmp_path)
     monkeypatch.setattr(admin_app, "ADMIN_PASSWORD", ADMIN_PW)
     monkeypatch.setattr(admin_app, "ADMIN_USERNAME", "admin")
-    monkeypatch.setattr(live_routes, "REMOTE_PASSWORD", REMOTE_PW)
-    monkeypatch.setattr(live_routes, "REMOTE_USERNAME", "remote")
     monkeypatch.setattr(
         live_routes,
         "_ctx",
@@ -104,47 +102,39 @@ def test_admin_still_requires_the_admin_password(client):
     assert client.get("/admin/live/", headers=ADMIN_HEADERS).status_code == 200
 
 
-def test_remote_password_does_not_open_admin(client):
-    """The whole point of a separate remote credential: the person running the
-    service from the back of the room must not thereby hold the key that can
-    publish copyrighted lyrics to the internet."""
-    assert client.get("/admin/live/", headers=REMOTE_HEADERS).status_code == 401
+def test_remote_uses_the_admin_credential(client):
+    """One credential, one Basic Auth realm.
 
-
-def test_admin_password_also_opens_the_remote(client):
-    """Deliberately *not* symmetric with the check above.
-
-    Browsers cache Basic Auth per origin, so a browser already logged into
-    /admin preemptively sends those credentials to /remote on the same host.
-    Rejecting them made the remote look permanently broken -- a login box
-    that fails whatever you type. Accepting them costs nothing: the admin
-    credential can already start sessions and take Planning Center control.
+    A separate remote password was tried and removed: browsers cache Basic
+    Auth per *origin*, so a browser that had ever seen the remote realm kept
+    re-sending those credentials to every path on the host, and the admin
+    password appeared rejected no matter how often it was typed (six
+    consecutive 401s observed against a real browser). Two Basic Auth
+    identities on one origin is not something a browser holds cleanly.
     """
+    assert client.get("/remote/").status_code == 401
     assert client.get("/remote/", headers=ADMIN_HEADERS).status_code == 200
 
 
-def test_admin_password_drives_the_remote_endpoints_too(client, monkeypatch):
+def test_remote_and_admin_share_one_realm(client):
+    """The realm string is the thing browsers key their credential cache on;
+    two different realms on one origin is what caused the 401 loop."""
+    realms = {
+        client.get(path).headers.get("WWW-Authenticate") for path in ("/admin/live/", "/remote/")
+    }
+    assert realms == {'Basic realm="admin"'}
+
+
+def test_admin_credential_drives_the_remote_endpoints(client, monkeypatch):
     _start_session(client, mode="control")
     monkeypatch.setattr(live_routes, "live_go_to_next_item", lambda *a: None)
     assert client.post("/remote/next", headers=ADMIN_HEADERS).status_code == 200
 
 
-def test_wrong_password_still_fails_on_the_remote(client):
-    """Accepting admin must not have widened this to 'any credential'."""
+def test_wrong_password_is_still_refused_on_the_remote(client):
+    """Sharing the admin credential must not mean accepting any credential."""
     assert client.get("/remote/", headers=_auth("admin", "wrong")).status_code == 401
-    assert client.get("/remote/", headers=_auth("remote", "wrong")).status_code == 401
-
-
-def test_remote_requires_its_own_password(client):
-    assert client.get("/remote/").status_code == 401
-    assert client.get("/remote/", headers=REMOTE_HEADERS).status_code == 200
-
-
-def test_remote_is_disabled_rather_than_open_when_unconfigured(client, monkeypatch):
-    """An unset REMOTE_PASSWORD must never fall through to 'no auth needed'."""
-    monkeypatch.setattr(live_routes, "REMOTE_PASSWORD", None)
-    assert client.get("/remote/").status_code == 503
-    assert client.get("/remote/", headers=REMOTE_HEADERS).status_code == 503
+    assert client.get("/remote/", headers=_auth("remote", "remote-pw")).status_code == 401
 
 
 def test_remote_write_routes_are_gated_too(client):

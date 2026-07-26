@@ -80,3 +80,344 @@ def test_find_plan_by_date_still_raises_when_nothing_matches_date(monkeypatch):
 
     with pytest.raises(pco_client.PlanningCenterError, match="No plan found"):
         pco_client.find_plan_by_date(None, target, "979578")
+
+
+# --------------------------------------------------------------------------
+# Services LIVE
+#
+# The shape being parsed here is the awkward part of the Live API: what's on
+# screen is reported as a `current_item_time` relationship pointing at an
+# ItemTime, and only the sideloaded ItemTime carries the link back to the
+# plan Item. Everything below pins that indirection down, plus the failure
+# modes that must degrade instead of raising -- this gets polled every couple
+# of seconds by a projector during a live service.
+# --------------------------------------------------------------------------
+
+
+def _live_payload(current_item_time_id="it9", included=None, **attrs):
+    base_attrs = {"can_control": False, "can_take_control": True, "title": "Sunday", "series_title": "Advent"}
+    base_attrs.update(attrs)
+    relationships = {"controller": {"data": {"id": "person1", "type": "Person"}}}
+    if current_item_time_id is not None:
+        relationships["current_item_time"] = {"data": {"id": current_item_time_id, "type": "ItemTime"}}
+    return {
+        "data": {"id": "live1", "attributes": base_attrs, "relationships": relationships},
+        "included": included
+        if included is not None
+        else [
+            {"type": "ItemTime", "id": "it9", "relationships": {"item": {"data": {"id": "item42"}}}},
+            {"type": "Person", "id": "person1", "attributes": {"name": "Ada L"}},
+        ],
+    }
+
+
+def test_live_status_resolves_item_time_to_plan_item(monkeypatch):
+    monkeypatch.setattr(pco_client, "api_get", lambda *a, **k: _live_payload())
+
+    status = pco_client.get_live_status(None, "st1", "p1")
+    assert status.current_item_id == "item42"
+    assert status.controller_name == "Ada L"
+    assert status.can_take_control is True
+    assert status.can_control is False
+    assert status.reachable is True
+
+
+def test_live_status_builds_controller_name_from_first_last(monkeypatch):
+    payload = _live_payload(
+        included=[
+            {"type": "ItemTime", "id": "it9", "relationships": {"item": {"data": {"id": "item42"}}}},
+            {"type": "Person", "id": "person1", "attributes": {"first_name": "Ada", "last_name": "Lovelace"}},
+        ]
+    )
+    monkeypatch.setattr(pco_client, "api_get", lambda *a, **k: payload)
+    assert pco_client.get_live_status(None, "st1", "p1").controller_name == "Ada Lovelace"
+
+
+def test_live_status_handles_nothing_live_yet(monkeypatch):
+    """Before the service starts there's no current_item_time relationship at
+    all -- that's 'waiting', not an error."""
+    monkeypatch.setattr(pco_client, "api_get", lambda *a, **k: _live_payload(current_item_time_id=None))
+
+    status = pco_client.get_live_status(None, "st1", "p1")
+    assert status.current_item_id is None
+    assert status.reachable is True
+
+
+def test_live_status_handles_null_relationship_data(monkeypatch):
+    """PCO spells 'empty relationship' as data: null as well as by omitting
+    the key entirely."""
+    payload = _live_payload()
+    payload["data"]["relationships"]["current_item_time"] = {"data": None}
+    monkeypatch.setattr(pco_client, "api_get", lambda *a, **k: payload)
+
+    assert pco_client.get_live_status(None, "st1", "p1").current_item_id is None
+
+
+def test_live_status_survives_missing_included_block(monkeypatch):
+    """If the sideload comes back empty the item can't be resolved, but the
+    call must still succeed -- the display shows 'waiting', not a 500."""
+    monkeypatch.setattr(pco_client, "api_get", lambda *a, **k: _live_payload(included=[]))
+
+    status = pco_client.get_live_status(None, "st1", "p1")
+    assert status.current_item_id is None
+    assert status.reachable is True
+
+
+def test_live_status_retries_without_include_when_include_is_rejected(monkeypatch):
+    """An unsupported `include` is a 400. Rather than lose the whole feature
+    over the controller's name, retry bare."""
+    calls = []
+
+    def fake_api_get(session, path, **params):
+        if path == "/me":
+            return {"data": {"id": "person1"}}
+        calls.append(params)
+        if "include" in params:
+            raise pco_client.PlanningCenterError("400 Bad Request")
+        return _live_payload(included=[])
+
+    monkeypatch.setattr(pco_client, "api_get", fake_api_get)
+
+    status = pco_client.get_live_status(None, "st1", "p1")
+    assert status.reachable is True
+    assert len(calls) == 2 and "include" not in calls[1]
+
+
+def test_live_status_reports_unreachable_instead_of_raising(monkeypatch):
+    def boom(*a, **k):
+        raise pco_client.PlanningCenterError("network is down")
+
+    monkeypatch.setattr(pco_client, "api_get", boom)
+
+    status = pco_client.get_live_status(None, "st1", "p1")
+    assert status.reachable is False
+    assert "network is down" in status.error
+
+
+# --------------------------------------------------------------------------
+# Control actions -- take/release must be idempotent, because toggle isn't.
+# --------------------------------------------------------------------------
+
+
+def test_take_control_toggles_only_when_not_already_controlling(monkeypatch):
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(holds_control=False)
+    )
+
+    pco_client.live_take_control(None, "st1", "p1")
+    assert posts == ["/service_types/st1/plans/p1/live/toggle_control"]
+
+
+def test_take_control_is_a_no_op_when_we_already_have_it(monkeypatch):
+    """Double-clicking 'Take control' must not hand control straight back --
+    toggle_control is a toggle, so a blind second call would release it."""
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(holds_control=True)
+    )
+
+    pco_client.live_take_control(None, "st1", "p1")
+    assert posts == []
+
+
+def test_release_control_is_a_no_op_when_we_do_not_have_it(monkeypatch):
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(holds_control=False)
+    )
+
+    pco_client.live_release_control(None, "st1", "p1")
+    assert posts == []
+
+
+def test_control_actions_do_not_touch_pco_when_status_is_unreachable(monkeypatch):
+    """No blind writes against an API we just failed to read."""
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(reachable=False, error="x")
+    )
+
+    pco_client.live_take_control(None, "st1", "p1")
+    pco_client.live_release_control(None, "st1", "p1")
+    assert posts == []
+
+
+def test_next_and_previous_hit_the_documented_action_paths(monkeypatch):
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+
+    pco_client.live_go_to_next_item(None, "st1", "p1")
+    pco_client.live_go_to_previous_item(None, "st1", "p1")
+    assert posts == [
+        "/service_types/st1/plans/p1/live/go_to_next_item",
+        "/service_types/st1/plans/p1/live/go_to_previous_item",
+    ]
+
+
+# --------------------------------------------------------------------------
+# collect_songs now has to carry the plan item id through.
+# --------------------------------------------------------------------------
+
+
+def test_collect_songs_carries_the_plan_item_id(monkeypatch):
+    item = {
+        "id": "item42",
+        "attributes": {"item_type": "song", "title": "Song A"},
+        "relationships": {"song": {"data": {"id": "s1"}}, "arrangement": {"data": {"id": "a1"}}},
+    }
+    monkeypatch.setattr(pco_client, "get_plan_items", lambda *a, **k: [item])
+    monkeypatch.setattr(
+        pco_client, "get_song", lambda *a, **k: {"attributes": {"title": "Song A", "ccli_number": "77"}}
+    )
+    monkeypatch.setattr(
+        pco_client,
+        "get_arrangement",
+        lambda *a, **k: {"id": "a1", "attributes": {"lyrics": "words", "chord_chart": ""}},
+    )
+
+    songs = pco_client.collect_songs(None, "st1", "p1", include_pdf_links=False)
+    assert [s.item_id for s in songs] == ["item42"]
+
+
+def test_collect_songs_keeps_item_id_when_the_song_record_fails_to_load(monkeypatch):
+    """The placeholder entry still needs an item id, or the display can never
+    match it against what Planning Center says is live."""
+    item = {"id": "item42", "attributes": {"item_type": "song", "title": "Song A"}, "relationships": {}}
+    monkeypatch.setattr(pco_client, "get_plan_items", lambda *a, **k: [item])
+
+    songs = pco_client.collect_songs(None, "st1", "p1", include_pdf_links=False)
+    assert [s.item_id for s in songs] == ["item42"]
+
+
+def test_plan_item_summaries_include_non_songs_in_order(monkeypatch):
+    items = [
+        {"id": "i1", "attributes": {"item_type": "item", "title": "Welcome", "sequence": 1}},
+        {"id": "i2", "attributes": {"item_type": "song", "title": "Song A", "sequence": 2}},
+    ]
+    monkeypatch.setattr(pco_client, "get_plan_items", lambda *a, **k: items)
+
+    summaries = pco_client.get_plan_item_summaries(None, "st1", "p1")
+    assert [(s.id, s.is_song) for s in summaries] == [("i1", False), ("i2", True)]
+
+
+# --------------------------------------------------------------------------
+# can_control vs. holds_control.
+#
+# Regression tests for a bug found against the live API on 2026-07-26:
+# `can_control` is a *permission* flag that reads True even when nobody is
+# controlling the plan. Branching on it made live_take_control a silent
+# no-op, after which every action failed with
+#   403 "cannot read ...LiveGoToNextItemAction with id nil"
+# because no LIVE session had actually been claimed.
+# --------------------------------------------------------------------------
+
+
+def test_can_control_true_with_no_controller_does_not_mean_we_hold_control(monkeypatch):
+    """The exact payload shape the real API returned: permitted to control,
+    but nobody is controlling."""
+    payload = _live_payload(included=[])
+    payload["data"]["attributes"]["can_control"] = True
+    payload["data"]["relationships"]["controller"] = {"data": None}
+    monkeypatch.setattr(pco_client, "api_get", lambda *a, **k: payload)
+
+    status = pco_client.get_live_status(None, "st1", "p1")
+    assert status.can_control is True
+    assert status.holds_control is False
+
+
+def test_holds_control_is_true_when_the_controller_is_us(monkeypatch):
+    payload = _live_payload(included=[])
+    payload["data"]["relationships"]["controller"] = {"data": {"id": "person1"}}
+
+    def fake_api_get(session, path, **params):
+        if path == "/me":
+            return {"data": {"id": "person1"}}
+        return payload
+
+    monkeypatch.setattr(pco_client, "api_get", fake_api_get)
+    assert pco_client.get_live_status(None, "st1", "p1").holds_control is True
+
+
+def test_holds_control_is_false_when_someone_else_controls(monkeypatch):
+    payload = _live_payload(included=[])
+    payload["data"]["relationships"]["controller"] = {"data": {"id": "someone-else"}}
+
+    def fake_api_get(session, path, **params):
+        if path == "/me":
+            return {"data": {"id": "person1"}}
+        return payload
+
+    monkeypatch.setattr(pco_client, "api_get", fake_api_get)
+    assert pco_client.get_live_status(None, "st1", "p1").holds_control is False
+
+
+def test_take_control_toggles_when_someone_else_is_controlling(monkeypatch):
+    """The case that was broken: another device holds control, and we must
+    actually POST toggle_control to take it."""
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client,
+        "get_live_status",
+        lambda *a, **k: pco_client.LiveStatus(can_control=True, holds_control=False, controller_id="other"),
+    )
+
+    pco_client.live_take_control(None, "st1", "p1")
+    assert posts == ["/service_types/st1/plans/p1/live/toggle_control"]
+
+
+def test_release_does_not_steal_control_from_someone_else(monkeypatch):
+    """Releasing while another device controls would *take* control -- the
+    opposite of what the button says."""
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client,
+        "get_live_status",
+        lambda *a, **k: pco_client.LiveStatus(can_control=True, holds_control=False, controller_id="other"),
+    )
+
+    pco_client.live_release_control(None, "st1", "p1")
+    assert posts == []
+
+
+def test_my_person_id_is_cached_on_the_session(monkeypatch):
+    """This sits behind a poll running every couple of seconds; it must not
+    add a request per poll."""
+
+    class FakeSession:
+        pass
+
+    calls = []
+
+    def fake_api_get(session, path, **params):
+        calls.append(path)
+        return {"data": {"id": "person1"}}
+
+    monkeypatch.setattr(pco_client, "api_get", fake_api_get)
+    session = FakeSession()
+    assert pco_client.get_my_person_id(session) == "person1"
+    assert pco_client.get_my_person_id(session) == "person1"
+    assert calls == ["/me"]
+
+
+def test_unresolvable_person_id_is_not_retried_every_poll(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        pass
+
+    def boom(session, path, **params):
+        calls.append(path)
+        raise pco_client.PlanningCenterError("no /me for you")
+
+    monkeypatch.setattr(pco_client, "api_get", boom)
+    session = FakeSession()
+    assert pco_client.get_my_person_id(session) is None
+    assert pco_client.get_my_person_id(session) is None
+    assert calls == ["/me"]

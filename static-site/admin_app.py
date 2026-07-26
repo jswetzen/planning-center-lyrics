@@ -76,6 +76,8 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from flask import Blueprint, Flask, Response, redirect, request, send_file, url_for
 
+import live_routes
+from live_session import read_session as read_live_session
 from pco_client import PlanningCenterError, build_session, list_service_types
 from scheduler import OpenPlan, RuleStore, clear_open_plan, evaluate_rule, read_open_plan, write_open_plan
 
@@ -118,19 +120,51 @@ _lock = threading.Lock()
 
 @app.before_request
 def _require_auth():
-    # Only /admin/* is gated -- "/" (the public lyrics page/placeholder)
-    # and "/healthz" are intentionally reachable without credentials.
-    if not request.path.startswith("/admin"):
+    """The app's single authentication gate -- every route's answer in one place.
+
+        /admin/*     ADMIN_PASSWORD.
+        /remote/*    ADMIN_PASSWORD, the same credential and the same Basic
+                     Auth realm -- deliberately, see below.
+        /project/*   No password. Gated by the unguessable token in its own
+                     URL, checked inside the route (live_routes) because the
+                     token is a path segment rather than a header. Read-only
+                     by construction -- see live_session.py's module docstring
+                     for why the projector gets a token instead of a password.
+        everything   "/" (the public page or placeholder) and "/healthz" are
+        else         deliberately open.
+
+    **Why /remote isn't a second credential.** It was one, briefly, on the
+    reasoning that whoever runs a service from the back of the room shouldn't
+    hold the key to the public site. That failed in practice: browsers cache
+    HTTP Basic Auth per *origin*, so a browser that had ever seen the remote
+    realm kept preemptively re-sending those credentials to every path on the
+    host, and the admin password appeared to be rejected no matter how many
+    times it was typed (observed 2026-07-26: six consecutive 401s on /remote
+    from a browser whose user was entering the correct admin password). Two
+    Basic Auth identities on one origin is not something a browser will hold
+    cleanly.
+
+    One credential and one realm removes the ambiguity outright. The
+    least-privilege split is worth revisiting if this ever moves to
+    cookie-based login, where two identities on one origin actually work --
+    the projector's token is unaffected either way.
+    """
+    path = request.path
+    if not path.startswith("/admin") and not path.startswith("/remote"):
         return
-    auth = request.authorization
-    if (
-        not auth
-        or not secrets.compare_digest(auth.username or "", ADMIN_USERNAME)
-        or not secrets.compare_digest(auth.password or "", ADMIN_PASSWORD)
-    ):
+    if not _is_admin(request.authorization):
         return Response(
             "Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="admin"'}
         )
+
+
+def _is_admin(auth) -> bool:
+    """Constant-time check of a credential against ADMIN_USERNAME/PASSWORD."""
+    if not auth or not ADMIN_PASSWORD:
+        return False
+    return secrets.compare_digest(auth.username or "", ADMIN_USERNAME) and secrets.compare_digest(
+        auth.password or "", ADMIN_PASSWORD
+    )
 
 
 @app.route("/healthz")
@@ -211,6 +245,7 @@ _STATUS_TEMPLATE = """<!doctype html>
 <form method="post" action="{open_url}"><button class="secondary">Open (serve lyrics)</button></form>
 <form method="post" action="{close_url}"><button class="secondary">Close (serve placeholder)</button></form>
 <p class="meta">Automation: {enabled_rule_count}/{total_rule_count} rule(s) enabled. <a href="{settings_url}">Manage rules &rarr;</a></p>
+<p class="meta">Live projection: {live_summary} <a href="{live_url}">Open &rarr;</a></p>
 </body>
 </html>
 """
@@ -507,6 +542,14 @@ def index():
     else:
         open_plan_html = f'<p class="meta">Opened manually for &ldquo;{escape(open_plan.plan_title)}&rdquo;.</p>'
 
+    live_session_state = read_live_session(DATA_DIR)
+    live_summary = (
+        f"projecting &ldquo;{escape(live_session_state.plan_title)}&rdquo; "
+        f"({escape(live_session_state.mode)} mode)."
+        if live_session_state
+        else "no session running."
+    )
+
     rules = RULE_STORE.load()
     return _STATUS_TEMPLATE.format(
         title_prefix=escape(TITLE_PREFIX),
@@ -521,6 +564,8 @@ def index():
         settings_url=url_for("admin.settings"),
         enabled_rule_count=sum(1 for r in rules if r.enabled),
         total_rule_count=len(rules),
+        live_summary=live_summary,
+        live_url=url_for("admin_live.live_index"),
     )
 
 
@@ -666,6 +711,23 @@ def delete_rule(rule_id: str):
 
 
 app.register_blueprint(admin_bp)
+
+# Live projection (/live, /remote, /admin/live). Shares this module's _lock
+# so a session/theme write can't interleave with an open/close or a scheduler
+# tick touching the same DATA_DIR.
+#
+# `site_is_open` is injected rather than imported: the public /live route
+# serves lyrics only while the site is open, and that decision has to keep
+# living here, in the one module that owns state.txt.
+live_routes.init_app(
+    app,
+    live_routes.LiveContext(
+        data_dir=DATA_DIR,
+        session=SESSION,
+        lock=_lock,
+        site_is_open=lambda: _read_state(DATA_DIR) == "open",
+    ),
+)
 
 
 # --------------------------------------------------------------------------

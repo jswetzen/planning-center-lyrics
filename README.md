@@ -2,9 +2,10 @@
 
 Pulls the song list + lyrics out of a Planning Center Services plan. The
 main thing here is a **self-hosted static lyrics site with a containerized
-admin+web deployment** (`static-site/`); a Notion-export script
-(`notion-export/`) and an untested live remote/wall-display proof of concept
-(`experimental/`) are also included.
+admin+web deployment** (`static-site/`), which also hosts a **live projector
++ remote synced to Planning Center's Services LIVE session**. A Notion-export
+script (`notion-export/`) and an older standalone remote/wall-display proof of
+concept (`experimental/`) are also included.
 
 In a hurry? See [QUICKSTART.md](QUICKSTART.md) to get the containerized site
 running. This file has the full picture, including the other two tools.
@@ -165,6 +166,75 @@ nothing already live, and only auto-closes a window it opened itself.
 means for this comparison; set it to your church's local timezone, since
 Planning Center's API returns times in UTC.
 
+### Live projection (admin UI)
+
+The admin UI's **Live projection** screen turns the same container into a
+projector + remote for an actual service, synced to Planning Center's own
+**Services LIVE** session. Pick a service type and a plan, start a session,
+and you get two URLs:
+
+- **the projector** (`/live`) -- full-screen lyrics for whatever item
+  Services LIVE currently has open. Public and read-only, so the
+  congregation can follow along on their phones from the same URL. It serves
+  lyrics **only while the public site is open**, which makes it strictly less
+  than what `/` is already showing at that moment: same window, one song
+  instead of the whole plan.
+- **the remote** (`/remote`) -- Prev/Next, tap-a-song-to-jump, and a
+  black-on-white / white-on-black toggle for the projector. Uses the same
+  `ADMIN_USERNAME`/`ADMIN_PASSWORD` as the admin UI.
+
+| Route | Who gets in | Can it write? |
+|---|---|---|
+| `/` | anyone (all songs, only while open) | no |
+| `/live` | anyone (current song, only while open) | no -- read-only by construction |
+| `/remote` | `ADMIN_PASSWORD` | drives the plan, only in control mode |
+| `/admin/*` | `ADMIN_PASSWORD` | everything |
+
+Both public routes answer to the same open/closed switch, so there's one
+place that decides whether copyrighted lyrics are being served at all.
+When the site is closed, `/live` shows the same "come back Sunday"
+placeholder `/` does -- which is also what a phone bookmarked on it sees
+during the week.
+
+> [!NOTE]
+> The remote had its own password at first, so that whoever runs a service
+> wouldn't hold the key to the public site. It was removed because browsers
+> cache HTTP Basic Auth **per host, not per path**: a browser that had seen
+> the remote's login kept re-sending it to every other page on the same host,
+> and the admin password looked rejected no matter how often it was typed.
+> Two Basic Auth logins on one host is not something a browser handles
+> cleanly. Splitting the roles again would need cookie-based login instead.
+
+#### Follow mode vs. control mode
+
+A session always starts in **follow mode**: the app only *reads* Planning
+Center and mirrors it onto the projector. Whoever is running Services LIVE
+from their own iPad stays in charge and never notices the projector exists.
+
+**Control mode** is entered only by an explicit, confirmed click.
+
+> [!WARNING]
+> Planning Center allows exactly **one controller per plan**. Taking control
+> disconnects whoever currently has it, with no warning on their end. Don't
+> click "Take control" unless you're the one running the service. Stopping
+> the session releases control automatically, so it isn't left parked on a
+> projector after everyone's gone home.
+
+When a *non-song* item is live -- sermon, offering, announcements -- the
+projector goes blank rather than leaving the last song's lyrics up. If
+Planning Center becomes unreachable mid-service, the display holds its last
+frame instead of blanking, and the remote shows why.
+
+> [!NOTE]
+> The Services LIVE integration **has been exercised end-to-end against a
+> real plan** (2026-07-26): taking control, next/previous, tap-to-jump, the
+> theme toggle, and releasing control all work, and the projector correctly
+> resolved live items to lyrics. What has *not* been tried is a real service
+> in progress with a leader controlling from their own device -- so the
+> contention path (following someone else, then taking control away from
+> them) is still only covered by unit tests. Try that on a plan nobody
+> depends on before relying on it.
+
 If your `podman` doesn't bundle a compose provider, install
 [`podman-compose`](https://github.com/containers/podman-compose) instead --
 `podman compose` transparently shells out to it. Plain `docker compose`
@@ -211,7 +281,15 @@ Open (or create) the destination page in Notion and paste the file's
 contents directly into the page body. Notion recognizes Markdown on paste
 and converts `#`/`##` into headings and `---` into a divider automatically.
 
-## Experimental: live remote + wall display
+## Experimental: standalone live remote + wall display
+
+> [!NOTE]
+> **Superseded by the admin UI's "Live projection" screen** (see above),
+> which does the same job inside the deployed container, syncs to Planning
+> Center's own Services LIVE session instead of keeping a private index, and
+> has real authentication. This standalone script is kept for the case where
+> you want a projector on a laptop with no container, no admin password, and
+> no Planning Center LIVE involvement at all.
 
 **Untested proof of concept -- this has not actually been run against a
 real plan/device pair yet.** Included for reference; expect rough edges,

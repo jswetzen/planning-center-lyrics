@@ -9,6 +9,7 @@ static-site/generate_static_site.py, and experimental/remote_display.py.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -75,6 +76,11 @@ def api_post(session: requests.Session, path: str) -> dict:
 
     Used for "action" endpoints like .../attachments/{id}/open, which mint a
     signed download URL rather than returning a plain resource.
+
+    Returns `{}` rather than raising when the response carries no JSON body:
+    the Services LIVE actions (go_to_next_item, toggle_control, ...) answer
+    with an empty 204 on success, and a bare `.json()` would turn a perfectly
+    successful control action into a decode error mid-service.
     """
     url = path if path.startswith("http") else f"{API_BASE}{path}"
     try:
@@ -88,7 +94,12 @@ def api_post(session: requests.Session, path: str) -> dict:
             f"{response.text[:500]}"
         )
 
-    return response.json()
+    if not response.content:
+        return {}
+    try:
+        return response.json()
+    except ValueError:
+        return {}
 
 
 def api_get_all_pages(session: requests.Session, path: str, **params: Any) -> list[dict]:
@@ -117,6 +128,49 @@ def api_get_all_pages(session: requests.Session, path: str, **params: Any) -> li
 
 def list_service_types(session: requests.Session) -> list[dict]:
     return api_get_all_pages(session, "/service_types")
+
+
+def has_scheduled_time(plan: dict) -> bool:
+    """Whether a plan has any PlanTime attached to it.
+
+    A plan with none is a dateless draft, and Planning Center reports its
+    `sort_date` as "whenever you called the API" rather than null -- so such
+    a plan spuriously matches *today* on every lookup, forever (see
+    find_plan_by_date's docstring for the full story and the real-world case
+    that surfaced it). Anything that resolves or offers up plans by date has
+    to filter these out first, which is why this lives here rather than
+    inline in one caller.
+    """
+    attrs = plan.get("attributes", {})
+    return (
+        attrs.get("service_time_count", 0)
+        + attrs.get("rehearsal_time_count", 0)
+        + attrs.get("other_time_count", 0)
+    ) > 0
+
+
+def list_selectable_plans(
+    session: requests.Session, service_type_id: str, limit: int = 25
+) -> list[dict]:
+    """Plans a human could plausibly want to project, nearest first.
+
+    Upcoming plans (including today's) with a real scheduled time. Dateless
+    drafts are filtered out via has_scheduled_time -- they're the ones that
+    would otherwise crowd the picker with entries like "Weekend25 Fredag
+    Kväll" that can never be placed on a calendar.
+    """
+    plans = api_get_all_pages(
+        session, f"/service_types/{service_type_id}/plans", filter="future", order="sort_date"
+    )
+    return [p for p in plans if has_scheduled_time(p)][:limit]
+
+
+def plan_display_title(plan: dict) -> str:
+    """The most human-readable name a plan has, for pickers and headings."""
+    attrs = plan.get("attributes", {})
+    title = attrs.get("title") or attrs.get("series_title") or f"Plan {plan.get('id')}"
+    dates = attrs.get("dates")
+    return f"{dates} -- {title}" if dates and dates != "No dates" else title
 
 
 def _nearest_upcoming_plan(session: requests.Session, service_type_id: str) -> Optional[dict]:
@@ -191,15 +245,9 @@ def find_plan_by_date(
     for st_id in service_type_ids:
         plans = api_get_all_pages(session, f"/service_types/{st_id}/plans", order="sort_date")
         for plan in plans:
-            attrs = plan["attributes"]
-            has_scheduled_time = (
-                attrs.get("service_time_count", 0)
-                + attrs.get("rehearsal_time_count", 0)
-                + attrs.get("other_time_count", 0)
-            ) > 0
-            if not has_scheduled_time:
+            if not has_scheduled_time(plan):
                 continue
-            sort_date = attrs.get("sort_date", "")
+            sort_date = plan["attributes"].get("sort_date", "")
             if sort_date.startswith(target.isoformat()):
                 return st_id, plan
 
@@ -318,6 +366,245 @@ def get_plan_songbook_url(session: requests.Session, service_type_id: str, plan_
 
 
 # --------------------------------------------------------------------------
+# Services LIVE
+#
+# Planning Center's own "Services LIVE" mode -- the thing a worship leader
+# drives from the Services app on an iPad, which walks the plan item by item
+# and records when each one actually started. The API exposes it as a single
+# `live` resource per plan, plus three POST actions.
+#
+# Two things about it shape everything built on top:
+#
+#   1. *Exactly one* controller per plan, org-wide. `toggle_control` takes
+#      control if you don't have it and releases it if you do -- and taking
+#      it boots whoever held it, with no confirmation step on their end.
+#      That is why nothing in this module takes control implicitly; callers
+#      have to ask for it (see live_take_control).
+#   2. What's live is reported indirectly, as a `current_item_time`
+#      relationship pointing at an ItemTime, *not* at an Item. The ItemTime
+#      is what carries the link back to the plan item, so resolving "which
+#      item is on screen right now" needs the sideloaded `included` block --
+#      hence the `include=` on the GET below.
+# --------------------------------------------------------------------------
+
+# Sideloaded so get_live_status can resolve current/next ItemTime -> Item and
+# name the controller in one round trip. Kept as a constant because the
+# fallback path below needs to talk about it in a log message.
+_LIVE_INCLUDES = "current_item_time,next_item_time,controller"
+
+
+@dataclass
+class LiveStatus:
+    """A snapshot of a plan's Services LIVE state.
+
+    `current_item_id`/`next_item_id` are already resolved from ItemTime to
+    the plan Item ids that get_plan_items/collect_songs return, so callers can
+    match them against a plan's items without knowing ItemTime exists.
+
+    **`can_control` does not mean "we are controlling".** It means this token
+    is *permitted* to control -- it reads True even when nobody holds control
+    at all. Confirmed against the live API on 2026-07-26: a plan with no
+    controller and no LIVE session in progress still reports
+    `can_control: true`. Use `holds_control` for "is this app driving?", which
+    is computed by comparing the controller relationship against the token's
+    own person id. Getting this wrong means take_control silently no-ops and
+    every subsequent action 403s with "cannot read ...Action with id nil".
+    """
+
+    can_control: bool = False
+    can_take_control: bool = False
+    controller_name: Optional[str] = None
+    controller_id: Optional[str] = None
+    holds_control: bool = False
+    current_item_id: Optional[str] = None
+    next_item_id: Optional[str] = None
+    title: str = ""
+    series_title: str = ""
+    # True when Planning Center answered at all. A False here means the poll
+    # failed (network blip, plan not live-able) and the caller should keep
+    # showing whatever it last had rather than blanking the projector.
+    reachable: bool = True
+    error: Optional[str] = None
+
+
+def _live_path(service_type_id: str, plan_id: str) -> str:
+    return f"/service_types/{service_type_id}/plans/{plan_id}/live"
+
+
+def get_my_person_id(session: requests.Session) -> Optional[str]:
+    """The Person id this token acts as, cached on the session object.
+
+    Needed to answer "are *we* the one controlling this plan?", since the
+    live resource reports a controller relationship but offers no "is that
+    me" flag. Cached because it never changes for a given token and this sits
+    behind a poll that runs every couple of seconds during a service.
+
+    Returns None if the lookup fails, which callers must treat as "unknown"
+    rather than "no" -- see live_take_control for how that degrades.
+    """
+    cached = getattr(session, "_pco_my_person_id", None)
+    if cached is not None:
+        return cached or None
+    try:
+        person_id = (api_get(session, "/me").get("data") or {}).get("id")
+    except PlanningCenterError as exc:
+        log.warning("Could not resolve this token's own person id: %s", exc)
+        person_id = None
+    try:
+        # "" is the cached form of "we asked and failed", so we don't re-ask
+        # on every poll; None would look like "never asked".
+        session._pco_my_person_id = person_id or ""
+    except AttributeError:
+        # Some test doubles (and None) don't accept attributes. Losing the
+        # cache costs an extra request, never correctness.
+        pass
+    return person_id
+
+
+def _rel_id(relationships: dict, name: str) -> Optional[str]:
+    """Pull relationships[name].data.id, tolerating every shape PCO uses for
+    'this relationship is empty' (missing key, null data, empty dict)."""
+    data = (relationships.get(name) or {}).get("data")
+    if isinstance(data, dict):
+        return data.get("id")
+    return None
+
+
+def _index_item_times(included: list[dict]) -> dict[str, str]:
+    """Map ItemTime id -> the plan Item id it belongs to."""
+    mapping: dict[str, str] = {}
+    for entry in included:
+        if entry.get("type") != "ItemTime":
+            continue
+        item_id = _rel_id(entry.get("relationships", {}), "item")
+        if item_id:
+            mapping[entry["id"]] = item_id
+    return mapping
+
+
+def _find_person_name(included: list[dict], person_id: Optional[str]) -> Optional[str]:
+    if not person_id:
+        return None
+    for entry in included:
+        if entry.get("type") == "Person" and entry.get("id") == person_id:
+            attrs = entry.get("attributes", {})
+            name = attrs.get("name") or " ".join(
+                part for part in (attrs.get("first_name"), attrs.get("last_name")) if part
+            )
+            return name.strip() or None
+    return None
+
+
+def get_live_status(session: requests.Session, service_type_id: str, plan_id: str) -> LiveStatus:
+    """Read a plan's Services LIVE state. Never raises.
+
+    This gets polled every couple of seconds by a projector that may be the
+    only thing the congregation is looking at, so a transient Planning Center
+    hiccup must not surface as an exception -- it comes back as
+    `reachable=False` and the caller holds its last known good frame.
+    """
+    path = _live_path(service_type_id, plan_id)
+    try:
+        payload = api_get(session, path, include=_LIVE_INCLUDES)
+    except PlanningCenterError as exc:
+        # An unsupported `include` is a 400, which would otherwise take the
+        # whole feature down for a cosmetic field (the controller's name).
+        # Retry bare: current/next item then resolve to None, which the
+        # display already renders as "waiting" rather than as stale lyrics.
+        log.warning("Live poll with include=%s failed (%s); retrying without it.", _LIVE_INCLUDES, exc)
+        try:
+            payload = api_get(session, path)
+        except PlanningCenterError as bare_exc:
+            return LiveStatus(reachable=False, error=str(bare_exc))
+
+    data = payload.get("data") or {}
+    attrs = data.get("attributes", {})
+    rels = data.get("relationships", {})
+    included = payload.get("included", []) or []
+    item_times = _index_item_times(included)
+
+    current_item_time_id = _rel_id(rels, "current_item_time")
+    next_item_time_id = _rel_id(rels, "next_item_time")
+    controller_id = _rel_id(rels, "controller")
+
+    my_person_id = get_my_person_id(session)
+    holds_control = bool(controller_id and my_person_id and controller_id == my_person_id)
+
+    return LiveStatus(
+        can_control=bool(attrs.get("can_control")),
+        can_take_control=bool(attrs.get("can_take_control")),
+        controller_name=_find_person_name(included, controller_id),
+        controller_id=controller_id,
+        holds_control=holds_control,
+        current_item_id=item_times.get(current_item_time_id or ""),
+        next_item_id=item_times.get(next_item_time_id or ""),
+        title=attrs.get("title") or "",
+        series_title=attrs.get("series_title") or "",
+    )
+
+
+def live_go_to_next_item(session: requests.Session, service_type_id: str, plan_id: str) -> None:
+    api_post(session, f"{_live_path(service_type_id, plan_id)}/go_to_next_item")
+
+
+def live_go_to_previous_item(session: requests.Session, service_type_id: str, plan_id: str) -> None:
+    api_post(session, f"{_live_path(service_type_id, plan_id)}/go_to_previous_item")
+
+
+def live_toggle_control(session: requests.Session, service_type_id: str, plan_id: str) -> None:
+    """Flip control of this plan's LIVE session.
+
+    Raw toggle, exactly as Planning Center exposes it: it takes control if
+    this token doesn't have it and releases control if it does. Callers
+    almost always want live_take_control/live_release_control below, which
+    read the current state first so "take control" is idempotent instead of
+    handing control back on a double-click.
+    """
+    api_post(session, f"{_live_path(service_type_id, plan_id)}/toggle_control")
+
+
+def live_take_control(session: requests.Session, service_type_id: str, plan_id: str) -> LiveStatus:
+    """Take control of the plan's LIVE session, if we don't already have it.
+
+    **This boots whoever currently holds control** (typically a worship
+    leader running Services LIVE on an iPad) -- Planning Center allows one
+    controller per plan and gives the displaced one no warning. Never call
+    this on a timer, a page load, or any other implicit path; it should be
+    reachable only from a deliberate, confirmed click.
+
+    Gated on `holds_control`, not `can_control`: the latter is a permission
+    flag that reads True even when nobody is controlling, so branching on it
+    made this a silent no-op and left every later action 403ing (see
+    LiveStatus). When the token's own person id can't be resolved,
+    holds_control is False and we toggle anyway -- taking control we already
+    have is recoverable, whereas never taking it breaks the whole feature.
+    """
+    status = get_live_status(session, service_type_id, plan_id)
+    if not status.reachable:
+        return status
+    if status.holds_control:
+        return status  # already ours; toggling here would *release* it
+    live_toggle_control(session, service_type_id, plan_id)
+    return get_live_status(session, service_type_id, plan_id)
+
+
+def live_release_control(session: requests.Session, service_type_id: str, plan_id: str) -> LiveStatus:
+    """Give up control, if we hold it, so a leader's own device can take over.
+
+    Deliberately does nothing when someone *else* is controlling: toggling
+    then would take control away from them, which is the exact opposite of
+    what a button labelled "Release" should do.
+    """
+    status = get_live_status(session, service_type_id, plan_id)
+    if not status.reachable:
+        return status
+    if not status.holds_control:
+        return status
+    live_toggle_control(session, service_type_id, plan_id)
+    return get_live_status(session, service_type_id, plan_id)
+
+
+# --------------------------------------------------------------------------
 # Song/lyrics assembly
 # --------------------------------------------------------------------------
 
@@ -329,7 +616,15 @@ def clean_text(text: str) -> str:
 
 
 class SongLyrics:
-    """Holds one plan item's song title plus its lyrics/chords text."""
+    """Holds one plan item's song title plus its lyrics/chords text.
+
+    `item_id` is the *plan item* id this song came from, not the song id --
+    it's what Services LIVE reports as the current item, so it's the only
+    handle that can answer "is this the song on screen right now". The
+    lyrics-export scripts ignore it; the live projection display depends on
+    it. It stays Optional because the error paths in collect_songs below can
+    produce a placeholder entry for an item whose song record wouldn't load.
+    """
 
     def __init__(
         self,
@@ -338,12 +633,14 @@ class SongLyrics:
         chord_chart: str,
         ccli_number: Optional[str],
         pdf_url: Optional[str] = None,
+        item_id: Optional[str] = None,
     ):
         self.title = title
         self.plain_lyrics = plain_lyrics
         self.chord_chart = chord_chart
         self.ccli_number = ccli_number
         self.pdf_url = pdf_url
+        self.item_id = item_id
 
     def body(self, include_chords: bool) -> str:
         if include_chords and self.chord_chart.strip():
@@ -366,11 +663,12 @@ def collect_songs(
         if attrs.get("item_type") != "song":
             continue
 
+        item_id = item.get("id")
         title = attrs.get("title") or "Untitled Song"
         song_rel = item.get("relationships", {}).get("song", {}).get("data")
         if not song_rel:
             log.warning("Plan item %r is a song but has no linked song record; skipping lyrics.", title)
-            songs.append(SongLyrics(title, "", "", None))
+            songs.append(SongLyrics(title, "", "", None, item_id=item_id))
             continue
 
         song_id = song_rel["id"]
@@ -378,7 +676,7 @@ def collect_songs(
             song = get_song(session, song_id)
         except PlanningCenterError as exc:
             log.warning("Could not load song %s (%s): %s", song_id, title, exc)
-            songs.append(SongLyrics(title, "", "", None))
+            songs.append(SongLyrics(title, "", "", None, item_id=item_id))
             continue
 
         song_title = song["attributes"].get("title") or title
@@ -407,6 +705,46 @@ def collect_songs(
         if include_pdf_links and arrangement:
             pdf_url = get_arrangement_pdf_url(session, song_id, arrangement["id"])
 
-        songs.append(SongLyrics(song_title, plain_lyrics, chord_chart, ccli_number, pdf_url))
+        songs.append(SongLyrics(song_title, plain_lyrics, chord_chart, ccli_number, pdf_url, item_id=item_id))
 
     return songs
+
+
+@dataclass
+class PlanItem:
+    """A slim projection of a plan item -- everything the live display needs
+    to reason about the plan's running order, without the lyrics payload.
+
+    collect_songs deliberately returns *only* songs, but a live session has
+    to know about the other items too: Services LIVE walks the whole running
+    order, so "which item is current" regularly lands on a sermon or an
+    announcement, and the display has to recognize that as "hold" rather than
+    as "unknown item" (or, worse, leave the previous song's lyrics up).
+    """
+
+    id: str
+    title: str
+    item_type: str
+    sequence: int = 0
+
+    @property
+    def is_song(self) -> bool:
+        return self.item_type == "song"
+
+
+def get_plan_item_summaries(
+    session: requests.Session, service_type_id: str, plan_id: str
+) -> list[PlanItem]:
+    """Return every item in a plan, in running order, songs and non-songs alike."""
+    summaries = []
+    for index, item in enumerate(get_plan_items(session, service_type_id, plan_id)):
+        attrs = item.get("attributes", {})
+        summaries.append(
+            PlanItem(
+                id=item["id"],
+                title=attrs.get("title") or "Untitled",
+                item_type=attrs.get("item_type") or "item",
+                sequence=attrs.get("sequence") if isinstance(attrs.get("sequence"), int) else index,
+            )
+        )
+    return summaries

@@ -456,3 +456,96 @@ def test_admin_status_page_links_to_the_live_console(client):
     assert res.status_code == 200
     assert b"Live projection" in res.data
     assert b"follow mode" in res.data
+
+
+# --------------------------------------------------------------------------
+# PowerPoint export (/admin/export)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def export_client(client, monkeypatch):
+    monkeypatch.setattr(
+        admin_app, "list_service_types", lambda s: [{"id": "st1", "attributes": {"name": "Sunday"}}]
+    )
+    monkeypatch.setattr(
+        admin_app,
+        "list_selectable_plans",
+        lambda s, st, limit=25: [
+            {"id": "p1", "attributes": {"title": "Sunday", "dates": "26 July 2026"}}
+        ],
+    )
+    monkeypatch.setattr(
+        admin_app,
+        "get_plan_by_id",
+        lambda s, pid, st: ("st1", {"id": "p1", "attributes": {"title": "Sunday", "sort_date": "2026-07-26T09:00:00Z"}}),
+    )
+    monkeypatch.setattr(
+        admin_app,
+        "collect_songs",
+        lambda *a, **k: [SongLyrics("Song A", "verse one\n\nverse two", "", "1234", item_id="i2")],
+    )
+    return client
+
+
+def test_export_page_requires_admin(export_client):
+    assert export_client.get("/admin/export").status_code == 401
+    assert export_client.get("/admin/export", headers=ADMIN_HEADERS).status_code == 200
+
+
+def test_export_page_lists_plans_for_the_chosen_service_type(export_client):
+    res = export_client.get("/admin/export?service_type_id=st1", headers=ADMIN_HEADERS)
+    assert b"26 July 2026" in res.data
+
+
+def test_export_downloads_a_pptx(export_client):
+    res = export_client.post(
+        "/admin/export/pptx",
+        data={"service_type_id": "st1", "plan_id": "p1", "theme": "dark", "strip_labels": "1"},
+        headers=ADMIN_HEADERS,
+    )
+    assert res.status_code == 200
+    assert "presentationml" in res.headers["Content-Type"]
+    assert res.data[:2] == b"PK"
+    assert "2026-07-26.pptx" in res.headers["Content-Disposition"]
+
+
+def test_export_slide_count_follows_the_stanzas(export_client):
+    import io as _io
+
+    from pptx import Presentation
+
+    res = export_client.post(
+        "/admin/export/pptx",
+        data={"service_type_id": "st1", "plan_id": "p1"},
+        headers=ADMIN_HEADERS,
+    )
+    assert len(Presentation(_io.BytesIO(res.data)).slides) == 2
+
+
+def test_export_requires_both_ids(export_client):
+    res = export_client.post("/admin/export/pptx", data={"plan_id": "p1"}, headers=ADMIN_HEADERS)
+    assert res.status_code == 302
+
+
+def test_export_reports_a_plan_with_no_songs(export_client, monkeypatch):
+    monkeypatch.setattr(admin_app, "collect_songs", lambda *a, **k: [])
+    res = export_client.post(
+        "/admin/export/pptx",
+        data={"service_type_id": "st1", "plan_id": "p1"},
+        headers=ADMIN_HEADERS,
+    )
+    assert res.status_code == 302
+    assert "no+songs" in res.headers["Location"] or "no%20songs" in res.headers["Location"]
+
+
+def test_export_writes_nothing_to_data_dir(export_client):
+    """The export is stateless on purpose -- it must not be able to disturb
+    the open/closed machinery or a running projection session."""
+    before = sorted(p.name for p in export_client.data_dir.iterdir())
+    export_client.post(
+        "/admin/export/pptx",
+        data={"service_type_id": "st1", "plan_id": "p1"},
+        headers=ADMIN_HEADERS,
+    )
+    assert sorted(p.name for p in export_client.data_dir.iterdir()) == before

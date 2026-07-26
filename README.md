@@ -29,6 +29,7 @@ running. This file has the full picture, including the other two tools.
 ```
 src/pco_client/       Shared Planning Center API client (used by everything below)
 static-site/          Main feature: static HTML site + admin/web Flask app + compose
+                      (also: live projection, remote, and PowerPoint export)
 notion-export/        Notion-ready Markdown export (the original script)
 experimental/         Live remote/wall display -- untested proof of concept
 ```
@@ -137,6 +138,36 @@ Then visit the admin UI (`http://<host>:9000/admin`, log in with
 service, and close it again afterwards. The generated site itself is served
 at `http://<host>:9000/`; put a reverse proxy in front of that port for a
 real domain + TLS.
+
+### PowerPoint / Keynote export
+
+**Admin UI &rarr; "Export a plan to PowerPoint"** (`/admin/export`) builds a
+`.pptx` deck from any upcoming plan: pick a service type and plan, choose
+white-on-black or black-on-white, and download.
+
+- **One slide per stanza**, not per song -- the unit of projection is a
+  screenful, and Planning Center's blank-line-separated lyrics are already
+  exactly that.
+- **Section labels are dropped.** Real plans on this account carry
+  `VERSE 1:`, `CHORUS:`, `TAG:`, `BRIDGE:` (and Swedish `Refräng`, `Vers`,
+  `Brygga`) as the first line of a stanza -- notes for the band that must not
+  end up on a screen the congregation is reading. Uncheck the box to keep
+  them.
+- **16:9**, with each song's **CCLI number in the footer of every slide** --
+  reporting what was projected is the licence-holder's job, and a number that
+  only lives in Planning Center won't be transcribed afterwards.
+- Songs with no lyrics in Planning Center still get a `[Song title]`
+  placeholder slide, so a gap is obvious in the deck rather than discovered
+  mid-service.
+
+**Keynote**: open the `.pptx` with File &rarr; Open and Keynote converts it.
+There's no writable Keynote format -- `.key` is an undocumented macOS-only
+bundle -- so handing Keynote a `.pptx` is what "export to Keynote" means here.
+
+Font sizes are *estimated* per slide from the longest line and the line
+count, because PowerPoint does its own text layout with fonts this code can't
+measure. Decks come out consistent, but a very long stanza may still want
+splitting by hand.
 
 ### Automation (scheduled open/close)
 

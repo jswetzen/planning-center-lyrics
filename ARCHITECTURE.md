@@ -282,6 +282,48 @@ across the *full* running order (a song-to-song jump usually crosses non-song it
 `MAX_JUMP_STEPS` caps how far one tap will walk so a mis-tap can't fire an unbounded burst of
 writes.
 
+## PowerPoint export (`pptx_export.py`)
+
+Same shape as the other two logic modules: **no Flask**, takes `SongLyrics` and returns bytes,
+so slide-splitting and font-sizing are unit-tested without a server (`tests/test_pptx_export.py`).
+`admin_app.py` owns the route (`/admin/export`, `/admin/export/pptx`) and the plan lookup.
+
+**Stateless on purpose.** The export writes nothing to `DATA_DIR` and touches no session, so it
+can't interact with the open/closed machinery or a running projection — a test asserts the data
+directory is byte-identical before and after an export.
+
+**One slide per stanza.** The unit of projection is a screenful, not a song. Planning Center
+stores lyrics as blank-line-separated stanzas, which is that unit already, so the split follows
+the document's own structure rather than guessing at one.
+
+**Section labels are stripped**, and this is not cosmetic: real songs on this account start
+stanzas with `VERSE 1:`, `CHORUS:`, `TAG:`, `BRIDGE:`. Those are notes for the band, and
+projecting them at a congregation is a visible mistake. `looks_like_section_label` is
+deliberately conservative — anchored, length-capped (≤24 chars), and only ever applied to the
+*first* line of a stanza — so "Bridge over troubled water" stays a lyric. Swedish labels
+(`Refräng`, `Vers`, `Brygga`, `Omkväde`) are recognized too, since that's what these songs are
+written in.
+
+**Font sizes are estimated, not measured.** PowerPoint lays text out itself using fonts this
+code can't see, and python-pptx's `fit_text()` needs font files present at render time —
+unreliable in an Alpine container. `choose_font_size` applies a width constraint (longest line)
+and a height constraint (line count) and takes the smaller, clamped to 18–54pt. The floor
+matters more than the ceiling: below ~18pt the back row is squinting, so an over-long stanza is
+better left slightly overflowing — visibly needing a manual split — than silently shrunk to
+unreadable.
+
+**`.pptx` only.** Keynote imports it; there is no writable Keynote format (`.key` is an
+undocumented macOS-only bundle), so "export to Keynote" is served by handing Keynote a `.pptx`.
+
+The CCLI number goes in the footer of *every* slide rather than on a title slide, because
+reporting what was projected is the licence-holder's obligation and a number that only exists in
+Planning Center is one nobody will transcribe afterwards.
+
+This adds the repo's first dependency beyond flask/requests/dotenv (`python-pptx`, which pulls
+lxml and Pillow). Those need compiling on Alpine/musl; the Dockerfile's builder stage already
+installs `gcc`/`musl-dev` for exactly this case, and the image has been confirmed to build and
+produce a valid deck.
+
 ## Auth
 
 Three credentials with three different jobs, all dispatched from the single `_require_auth`
@@ -406,7 +448,8 @@ Three jobs on every push/PR to `main`:
 
 - **`build`**: builds `static-site/Dockerfile` (confirms it still builds after a
   Dockerfile/dependency change) — not pushed anywhere by this job.
-- **`test`**: `uv run pytest` — the scheduler/state-machine logic
+- **`test`**: `uv run pytest` — the PowerPoint export (`tests/test_pptx_export.py`), the
+  scheduler/state-machine logic
   (`tests/test_scheduler.py`, `tests/test_admin_state_machine.py`), the Planning Center client
   including the Services LIVE response shapes (`tests/test_pco_client.py`), and the live
   projection logic and route/auth boundaries (`tests/test_live_session.py`,

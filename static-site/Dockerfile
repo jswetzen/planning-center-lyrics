@@ -23,7 +23,7 @@ RUN uv sync --frozen --no-dev
 # has to land flat in /app -- a missing entry here is an ImportError at
 # container start, not a build failure.
 COPY static-site/generate_static_site.py static-site/admin_app.py static-site/scheduler.py \
-     static-site/live_session.py static-site/live_routes.py ./
+     static-site/live_session.py static-site/live_routes.py static-site/pptx_export.py ./
 
 FROM docker.io/library/python:3.12-alpine
 

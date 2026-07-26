@@ -400,11 +400,22 @@ class LiveStatus:
     `current_item_id`/`next_item_id` are already resolved from ItemTime to
     the plan Item ids that get_plan_items/collect_songs return, so callers can
     match them against a plan's items without knowing ItemTime exists.
+
+    **`can_control` does not mean "we are controlling".** It means this token
+    is *permitted* to control -- it reads True even when nobody holds control
+    at all. Confirmed against the live API on 2026-07-26: a plan with no
+    controller and no LIVE session in progress still reports
+    `can_control: true`. Use `holds_control` for "is this app driving?", which
+    is computed by comparing the controller relationship against the token's
+    own person id. Getting this wrong means take_control silently no-ops and
+    every subsequent action 403s with "cannot read ...Action with id nil".
     """
 
     can_control: bool = False
     can_take_control: bool = False
     controller_name: Optional[str] = None
+    controller_id: Optional[str] = None
+    holds_control: bool = False
     current_item_id: Optional[str] = None
     next_item_id: Optional[str] = None
     title: str = ""
@@ -418,6 +429,36 @@ class LiveStatus:
 
 def _live_path(service_type_id: str, plan_id: str) -> str:
     return f"/service_types/{service_type_id}/plans/{plan_id}/live"
+
+
+def get_my_person_id(session: requests.Session) -> Optional[str]:
+    """The Person id this token acts as, cached on the session object.
+
+    Needed to answer "are *we* the one controlling this plan?", since the
+    live resource reports a controller relationship but offers no "is that
+    me" flag. Cached because it never changes for a given token and this sits
+    behind a poll that runs every couple of seconds during a service.
+
+    Returns None if the lookup fails, which callers must treat as "unknown"
+    rather than "no" -- see live_take_control for how that degrades.
+    """
+    cached = getattr(session, "_pco_my_person_id", None)
+    if cached is not None:
+        return cached or None
+    try:
+        person_id = (api_get(session, "/me").get("data") or {}).get("id")
+    except PlanningCenterError as exc:
+        log.warning("Could not resolve this token's own person id: %s", exc)
+        person_id = None
+    try:
+        # "" is the cached form of "we asked and failed", so we don't re-ask
+        # on every poll; None would look like "never asked".
+        session._pco_my_person_id = person_id or ""
+    except AttributeError:
+        # Some test doubles (and None) don't accept attributes. Losing the
+        # cache costs an extra request, never correctness.
+        pass
+    return person_id
 
 
 def _rel_id(relationships: dict, name: str) -> Optional[str]:
@@ -484,11 +525,17 @@ def get_live_status(session: requests.Session, service_type_id: str, plan_id: st
 
     current_item_time_id = _rel_id(rels, "current_item_time")
     next_item_time_id = _rel_id(rels, "next_item_time")
+    controller_id = _rel_id(rels, "controller")
+
+    my_person_id = get_my_person_id(session)
+    holds_control = bool(controller_id and my_person_id and controller_id == my_person_id)
 
     return LiveStatus(
         can_control=bool(attrs.get("can_control")),
         can_take_control=bool(attrs.get("can_take_control")),
-        controller_name=_find_person_name(included, _rel_id(rels, "controller")),
+        controller_name=_find_person_name(included, controller_id),
+        controller_id=controller_id,
+        holds_control=holds_control,
         current_item_id=item_times.get(current_item_time_id or ""),
         next_item_id=item_times.get(next_item_time_id or ""),
         title=attrs.get("title") or "",
@@ -524,22 +571,34 @@ def live_take_control(session: requests.Session, service_type_id: str, plan_id: 
     controller per plan and gives the displaced one no warning. Never call
     this on a timer, a page load, or any other implicit path; it should be
     reachable only from a deliberate, confirmed click.
+
+    Gated on `holds_control`, not `can_control`: the latter is a permission
+    flag that reads True even when nobody is controlling, so branching on it
+    made this a silent no-op and left every later action 403ing (see
+    LiveStatus). When the token's own person id can't be resolved,
+    holds_control is False and we toggle anyway -- taking control we already
+    have is recoverable, whereas never taking it breaks the whole feature.
     """
     status = get_live_status(session, service_type_id, plan_id)
     if not status.reachable:
         return status
-    if status.can_control:
+    if status.holds_control:
         return status  # already ours; toggling here would *release* it
     live_toggle_control(session, service_type_id, plan_id)
     return get_live_status(session, service_type_id, plan_id)
 
 
 def live_release_control(session: requests.Session, service_type_id: str, plan_id: str) -> LiveStatus:
-    """Give up control, if we hold it, so a leader's own device can take over."""
+    """Give up control, if we hold it, so a leader's own device can take over.
+
+    Deliberately does nothing when someone *else* is controlling: toggling
+    then would take control away from them, which is the exact opposite of
+    what a button labelled "Release" should do.
+    """
     status = get_live_status(session, service_type_id, plan_id)
     if not status.reachable:
         return status
-    if not status.can_control:
+    if not status.holds_control:
         return status
     live_toggle_control(session, service_type_id, plan_id)
     return get_live_status(session, service_type_id, plan_id)

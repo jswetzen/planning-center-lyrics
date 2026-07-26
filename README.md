@@ -189,8 +189,12 @@ Three credentials, three different jobs:
 |---|---|---|
 | `/` | anyone | no |
 | `/project/<token>` | anyone with the link | no -- read-only by construction |
-| `/remote` | `REMOTE_PASSWORD` | drives the plan, only in control mode |
-| `/admin/*` | `ADMIN_PASSWORD` | everything |
+| `/remote` | `REMOTE_PASSWORD` (or `ADMIN_PASSWORD`) | drives the plan, only in control mode |
+| `/admin/*` | `ADMIN_PASSWORD` only | everything |
+
+The admin password also opens `/remote` — browsers cache Basic Auth per host, so a browser
+already logged into `/admin` would otherwise hit a login box it could never satisfy. The
+direction that matters is still enforced: `REMOTE_PASSWORD` cannot reach `/admin`.
 
 #### Follow mode vs. control mode
 
@@ -213,10 +217,14 @@ Planning Center becomes unreachable mid-service, the display holds its last
 frame instead of blanking, and the remote shows why.
 
 > [!NOTE]
-> The Services LIVE integration is written against Planning Center's
-> documented API but **has not been exercised against a real live service
-> yet** -- the unit tests cover the logic with recorded response shapes, not
-> the real thing. Try it on a plan nobody depends on before a Sunday.
+> The Services LIVE integration **has been exercised end-to-end against a
+> real plan** (2026-07-26): taking control, next/previous, tap-to-jump, the
+> theme toggle, and releasing control all work, and the projector correctly
+> resolved live items to lyrics. What has *not* been tried is a real service
+> in progress with a leader controlling from their own device -- so the
+> contention path (following someone else, then taking control away from
+> them) is still only covered by unit tests. Try that on a plan nobody
+> depends on before relying on it.
 
 If your `podman` doesn't bundle a compose provider, install
 [`podman-compose`](https://github.com/containers/podman-compose) instead --

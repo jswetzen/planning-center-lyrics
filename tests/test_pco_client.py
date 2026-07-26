@@ -169,6 +169,8 @@ def test_live_status_retries_without_include_when_include_is_rejected(monkeypatc
     calls = []
 
     def fake_api_get(session, path, **params):
+        if path == "/me":
+            return {"data": {"id": "person1"}}
         calls.append(params)
         if "include" in params:
             raise pco_client.PlanningCenterError("400 Bad Request")
@@ -201,7 +203,7 @@ def test_take_control_toggles_only_when_not_already_controlling(monkeypatch):
     posts = []
     monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
     monkeypatch.setattr(
-        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(can_control=False)
+        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(holds_control=False)
     )
 
     pco_client.live_take_control(None, "st1", "p1")
@@ -214,7 +216,7 @@ def test_take_control_is_a_no_op_when_we_already_have_it(monkeypatch):
     posts = []
     monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
     monkeypatch.setattr(
-        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(can_control=True)
+        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(holds_control=True)
     )
 
     pco_client.live_take_control(None, "st1", "p1")
@@ -225,7 +227,7 @@ def test_release_control_is_a_no_op_when_we_do_not_have_it(monkeypatch):
     posts = []
     monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
     monkeypatch.setattr(
-        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(can_control=False)
+        pco_client, "get_live_status", lambda *a, **k: pco_client.LiveStatus(holds_control=False)
     )
 
     pco_client.live_release_control(None, "st1", "p1")
@@ -301,3 +303,121 @@ def test_plan_item_summaries_include_non_songs_in_order(monkeypatch):
 
     summaries = pco_client.get_plan_item_summaries(None, "st1", "p1")
     assert [(s.id, s.is_song) for s in summaries] == [("i1", False), ("i2", True)]
+
+
+# --------------------------------------------------------------------------
+# can_control vs. holds_control.
+#
+# Regression tests for a bug found against the live API on 2026-07-26:
+# `can_control` is a *permission* flag that reads True even when nobody is
+# controlling the plan. Branching on it made live_take_control a silent
+# no-op, after which every action failed with
+#   403 "cannot read ...LiveGoToNextItemAction with id nil"
+# because no LIVE session had actually been claimed.
+# --------------------------------------------------------------------------
+
+
+def test_can_control_true_with_no_controller_does_not_mean_we_hold_control(monkeypatch):
+    """The exact payload shape the real API returned: permitted to control,
+    but nobody is controlling."""
+    payload = _live_payload(included=[])
+    payload["data"]["attributes"]["can_control"] = True
+    payload["data"]["relationships"]["controller"] = {"data": None}
+    monkeypatch.setattr(pco_client, "api_get", lambda *a, **k: payload)
+
+    status = pco_client.get_live_status(None, "st1", "p1")
+    assert status.can_control is True
+    assert status.holds_control is False
+
+
+def test_holds_control_is_true_when_the_controller_is_us(monkeypatch):
+    payload = _live_payload(included=[])
+    payload["data"]["relationships"]["controller"] = {"data": {"id": "person1"}}
+
+    def fake_api_get(session, path, **params):
+        if path == "/me":
+            return {"data": {"id": "person1"}}
+        return payload
+
+    monkeypatch.setattr(pco_client, "api_get", fake_api_get)
+    assert pco_client.get_live_status(None, "st1", "p1").holds_control is True
+
+
+def test_holds_control_is_false_when_someone_else_controls(monkeypatch):
+    payload = _live_payload(included=[])
+    payload["data"]["relationships"]["controller"] = {"data": {"id": "someone-else"}}
+
+    def fake_api_get(session, path, **params):
+        if path == "/me":
+            return {"data": {"id": "person1"}}
+        return payload
+
+    monkeypatch.setattr(pco_client, "api_get", fake_api_get)
+    assert pco_client.get_live_status(None, "st1", "p1").holds_control is False
+
+
+def test_take_control_toggles_when_someone_else_is_controlling(monkeypatch):
+    """The case that was broken: another device holds control, and we must
+    actually POST toggle_control to take it."""
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client,
+        "get_live_status",
+        lambda *a, **k: pco_client.LiveStatus(can_control=True, holds_control=False, controller_id="other"),
+    )
+
+    pco_client.live_take_control(None, "st1", "p1")
+    assert posts == ["/service_types/st1/plans/p1/live/toggle_control"]
+
+
+def test_release_does_not_steal_control_from_someone_else(monkeypatch):
+    """Releasing while another device controls would *take* control -- the
+    opposite of what the button says."""
+    posts = []
+    monkeypatch.setattr(pco_client, "api_post", lambda s, path: posts.append(path))
+    monkeypatch.setattr(
+        pco_client,
+        "get_live_status",
+        lambda *a, **k: pco_client.LiveStatus(can_control=True, holds_control=False, controller_id="other"),
+    )
+
+    pco_client.live_release_control(None, "st1", "p1")
+    assert posts == []
+
+
+def test_my_person_id_is_cached_on_the_session(monkeypatch):
+    """This sits behind a poll running every couple of seconds; it must not
+    add a request per poll."""
+
+    class FakeSession:
+        pass
+
+    calls = []
+
+    def fake_api_get(session, path, **params):
+        calls.append(path)
+        return {"data": {"id": "person1"}}
+
+    monkeypatch.setattr(pco_client, "api_get", fake_api_get)
+    session = FakeSession()
+    assert pco_client.get_my_person_id(session) == "person1"
+    assert pco_client.get_my_person_id(session) == "person1"
+    assert calls == ["/me"]
+
+
+def test_unresolvable_person_id_is_not_retried_every_poll(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        pass
+
+    def boom(session, path, **params):
+        calls.append(path)
+        raise pco_client.PlanningCenterError("no /me for you")
+
+    monkeypatch.setattr(pco_client, "api_get", boom)
+    session = FakeSession()
+    assert pco_client.get_my_person_id(session) is None
+    assert pco_client.get_my_person_id(session) is None
+    assert calls == ["/me"]

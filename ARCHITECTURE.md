@@ -224,6 +224,36 @@ does that resolution behind `include=current_item_time,next_item_time,controller
 callers plain item ids. This is also why `SongLyrics` gained an `item_id`: `collect_songs`
 previously discarded it, and without it there's no way to answer "is this the song on screen".
 
+### `can_control` does not mean "we are controlling" (found 2026-07-26, against the live API)
+
+The `live` resource's `can_control` attribute is a **permission** flag — "this token is allowed
+to control" — and it reads `true` even when nobody holds control and no LIVE session exists at
+all. It is *not* "we are the controller", which is what the name suggests and what the first
+implementation assumed.
+
+The failure that assumption produced was quiet and total: `live_take_control` short-circuited on
+`can_control` being already true, so it never POSTed `toggle_control`, so no LIVE session was
+ever claimed — and every subsequent action failed with
+
+```
+403 Forbidden — User with id … cannot read
+    AppGraph::V2018_11_01::Actions::LiveGoToNextItemAction with id nil
+```
+
+The `with id nil` is the tell: the action had no live session to act on. Nothing in the 403 says
+"you never took control", which is what made it worth writing down.
+
+The reliable signal is the **`controller` relationship compared against the token's own person
+id** (`get_my_person_id`, `GET /services/v2/me`, cached on the session since this sits behind a
+2-second poll). That's `LiveStatus.holds_control`, and it's what take/release and the UI branch
+on. `can_control` is still exposed but only means what it actually means. Confirmed working
+end-to-end against a real plan: take → `controller` becomes us → `go_to_next_item` returns 200.
+
+A second-order bug from the same confusion: `live_release_control` also branched on
+`can_control`, so pressing "Release" while *someone else* held control would have toggled
+control **to** us — the exact opposite of the button's label. It now no-ops unless we actually
+hold it.
+
 **Follow vs. control.** A session always starts in `follow` mode, where the app has never
 written to Planning Center — it polls and mirrors, and whoever holds control keeps it.
 `control` mode is entered only through a confirmed click on `/admin/live`. This matters because
@@ -261,13 +291,21 @@ hook (`@app.before_request`) so every route's answer to "who gets in" is readabl
 |---|---|---|
 | `/`, `/healthz` | none | none |
 | `/project/<token>` | token in the URL, checked in-route | **none** — no POST route exists under `/project` |
-| `/remote/*` | `REMOTE_PASSWORD` (separate credential) | drives Planning Center, control mode only |
-| `/admin/*` | `ADMIN_PASSWORD` | everything |
+| `/remote/*` | `REMOTE_PASSWORD` **or** `ADMIN_PASSWORD` | drives Planning Center, control mode only |
+| `/admin/*` | `ADMIN_PASSWORD` only | everything |
 
 `/remote` gets its own password rather than reusing the admin one because the person running a
 service from the back of the room shouldn't hold the credential that can publish copyrighted
 lyrics to the internet. An unset `REMOTE_PASSWORD` makes `/remote` return **503, not open** —
 missing config must never mean "no auth required".
+
+The gate is deliberately **asymmetric**: the admin credential also opens `/remote`, but the
+remote credential never opens `/admin`. Browsers cache HTTP Basic Auth per *origin*, so a
+browser already authenticated to `/admin` preemptively sends those credentials to `/remote` on
+the same host — and rejecting them there produced a login box that appeared to fail no matter
+what was typed (reported 2026-07-26). Accepting them costs nothing, since the admin credential
+can already start sessions and take Planning Center control; the direction that carries the
+actual security property is the one still enforced.
 
 The projector gets a **token in its URL instead of a password** because it's an unattended
 browser on a booth machine several people can walk up to, with no practical way to log it out

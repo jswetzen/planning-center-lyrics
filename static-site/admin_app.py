@@ -128,7 +128,8 @@ def _require_auth():
                      running a service from the back of the room shouldn't
                      need (or hold) the key to the public site. 503s until
                      it's configured, so an unset password can never mean
-                     "open".
+                     "open". ADMIN_PASSWORD is also accepted here -- see
+                     below.
         /project/*   No password. Gated by the unguessable token in its own
                      URL, checked inside the route (live_routes) because the
                      token is a path segment rather than a header. Read-only
@@ -139,18 +140,33 @@ def _require_auth():
     """
     path = request.path
     if path.startswith("/remote"):
+        # Admin credentials open the remote too. Not a convenience shortcut:
+        # HTTP Basic Auth is cached per *origin* by browsers, so once someone
+        # has logged into /admin, their browser preemptively sends those
+        # credentials to /remote on the same host -- and rejecting them there
+        # produced a login box that appears to fail no matter what you type.
+        # Allowing them costs nothing, since the admin credential can already
+        # start sessions and take Planning Center control; the direction that
+        # matters (REMOTE_PASSWORD must not reach /admin) is still enforced
+        # below.
+        if _is_admin(request.authorization):
+            return
         return live_routes.remote_auth_error()
     if not path.startswith("/admin"):
         return
-    auth = request.authorization
-    if (
-        not auth
-        or not secrets.compare_digest(auth.username or "", ADMIN_USERNAME)
-        or not secrets.compare_digest(auth.password or "", ADMIN_PASSWORD)
-    ):
+    if not _is_admin(request.authorization):
         return Response(
             "Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="admin"'}
         )
+
+
+def _is_admin(auth) -> bool:
+    """Constant-time check of a credential against ADMIN_USERNAME/PASSWORD."""
+    if not auth or not ADMIN_PASSWORD:
+        return False
+    return secrets.compare_digest(auth.username or "", ADMIN_USERNAME) and secrets.compare_digest(
+        auth.password or "", ADMIN_PASSWORD
+    )
 
 
 @app.route("/healthz")

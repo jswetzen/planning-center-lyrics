@@ -111,10 +111,28 @@ def test_remote_password_does_not_open_admin(client):
     assert client.get("/admin/live/", headers=REMOTE_HEADERS).status_code == 401
 
 
-def test_admin_password_does_not_open_the_remote(client):
-    """Symmetry check -- the gate dispatches on path prefix, and /remote is
-    checked before the /admin branch, so this catches a mis-ordered rewrite."""
-    assert client.get("/remote/", headers=ADMIN_HEADERS).status_code == 401
+def test_admin_password_also_opens_the_remote(client):
+    """Deliberately *not* symmetric with the check above.
+
+    Browsers cache Basic Auth per origin, so a browser already logged into
+    /admin preemptively sends those credentials to /remote on the same host.
+    Rejecting them made the remote look permanently broken -- a login box
+    that fails whatever you type. Accepting them costs nothing: the admin
+    credential can already start sessions and take Planning Center control.
+    """
+    assert client.get("/remote/", headers=ADMIN_HEADERS).status_code == 200
+
+
+def test_admin_password_drives_the_remote_endpoints_too(client, monkeypatch):
+    _start_session(client, mode="control")
+    monkeypatch.setattr(live_routes, "live_go_to_next_item", lambda *a: None)
+    assert client.post("/remote/next", headers=ADMIN_HEADERS).status_code == 200
+
+
+def test_wrong_password_still_fails_on_the_remote(client):
+    """Accepting admin must not have widened this to 'any credential'."""
+    assert client.get("/remote/", headers=_auth("admin", "wrong")).status_code == 401
+    assert client.get("/remote/", headers=_auth("remote", "wrong")).status_code == 401
 
 
 def test_remote_requires_its_own_password(client):
@@ -269,7 +287,7 @@ def test_stopping_a_following_session_does_not_touch_planning_center(client, mon
 
 def test_take_control_records_control_mode(client, monkeypatch):
     _start_session(client, mode="follow")
-    monkeypatch.setattr(live_routes, "live_take_control", lambda *a: LiveStatus(can_control=True))
+    monkeypatch.setattr(live_routes, "live_take_control", lambda *a: LiveStatus(holds_control=True))
 
     client.post("/admin/live/take", headers=ADMIN_HEADERS)
     assert live_session.read_session(client.data_dir).mode == "control"
@@ -280,7 +298,7 @@ def test_take_control_stays_in_follow_mode_if_pco_refuses(client, monkeypatch):
     'control' locally would leave the remote firing writes that silently
     do nothing."""
     _start_session(client, mode="follow")
-    monkeypatch.setattr(live_routes, "live_take_control", lambda *a: LiveStatus(can_control=False))
+    monkeypatch.setattr(live_routes, "live_take_control", lambda *a: LiveStatus(holds_control=False))
 
     client.post("/admin/live/take", headers=ADMIN_HEADERS)
     assert live_session.read_session(client.data_dir).mode == "follow"
@@ -384,7 +402,7 @@ def test_active_page_renders_in_control_mode(client, monkeypatch):
     monkeypatch.setattr(
         live_routes,
         "poll_live",
-        lambda s, force=False: LiveStatus(current_item_id="i2", can_control=True, controller_name="Ada"),
+        lambda s, force=False: LiveStatus(current_item_id="i2", holds_control=True, controller_name="Ada"),
     )
 
     res = client.get("/admin/live/", headers=ADMIN_HEADERS)

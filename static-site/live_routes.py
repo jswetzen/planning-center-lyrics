@@ -311,7 +311,7 @@ def remote_state():
         else []
     )
     payload["mode"] = session_state.mode if session_state else "follow"
-    payload["can_control"] = bool(live and live.can_control)
+    payload["holds_control"] = bool(live and live.holds_control)
     payload["controller_name"] = live.controller_name if live else None
     payload["session_active"] = session_state is not None
     return jsonify(payload)
@@ -484,7 +484,7 @@ def live_index():
         state, live = current_display(session_state)
         token = ensure_display_token(ctx().data_dir)
         display_url = url_for("project.display_page", token=token, _external=True)
-        in_control = bool(live and live.can_control)
+        in_control = bool(live and live.holds_control)
         controller = (live.controller_name if live else None) or "nobody"
 
         body = _LIVE_ACTIVE_TEMPLATE.format(
@@ -581,7 +581,7 @@ def take():
         status = live_take_control(ctx().session, session_state.service_type_id, session_state.plan_id)
     except PlanningCenterError as exc:
         return redirect(url_for("admin_live.live_index", error=str(exc)))
-    if not status.can_control:
+    if not status.holds_control:
         return redirect(
             url_for(
                 "admin_live.live_index",

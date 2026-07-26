@@ -76,6 +76,8 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from flask import Blueprint, Flask, Response, redirect, request, send_file, url_for
 
+import live_routes
+from live_session import read_session as read_live_session
 from pco_client import PlanningCenterError, build_session, list_service_types
 from scheduler import OpenPlan, RuleStore, clear_open_plan, evaluate_rule, read_open_plan, write_open_plan
 
@@ -118,9 +120,27 @@ _lock = threading.Lock()
 
 @app.before_request
 def _require_auth():
-    # Only /admin/* is gated -- "/" (the public lyrics page/placeholder)
-    # and "/healthz" are intentionally reachable without credentials.
-    if not request.path.startswith("/admin"):
+    """The app's single authentication gate -- every route's answer in one place.
+
+        /admin/*     ADMIN_PASSWORD. Can serve copyrighted lyrics publicly and
+                     can take over Planning Center's live session.
+        /remote/*    REMOTE_PASSWORD, a *separate* credential: the person
+                     running a service from the back of the room shouldn't
+                     need (or hold) the key to the public site. 503s until
+                     it's configured, so an unset password can never mean
+                     "open".
+        /project/*   No password. Gated by the unguessable token in its own
+                     URL, checked inside the route (live_routes) because the
+                     token is a path segment rather than a header. Read-only
+                     by construction -- see live_session.py's module docstring
+                     for why the projector gets a token instead of a password.
+        everything   "/" (the public page or placeholder) and "/healthz" are
+        else         deliberately open.
+    """
+    path = request.path
+    if path.startswith("/remote"):
+        return live_routes.remote_auth_error()
+    if not path.startswith("/admin"):
         return
     auth = request.authorization
     if (
@@ -211,6 +231,7 @@ _STATUS_TEMPLATE = """<!doctype html>
 <form method="post" action="{open_url}"><button class="secondary">Open (serve lyrics)</button></form>
 <form method="post" action="{close_url}"><button class="secondary">Close (serve placeholder)</button></form>
 <p class="meta">Automation: {enabled_rule_count}/{total_rule_count} rule(s) enabled. <a href="{settings_url}">Manage rules &rarr;</a></p>
+<p class="meta">Live projection: {live_summary} <a href="{live_url}">Open &rarr;</a></p>
 </body>
 </html>
 """
@@ -507,6 +528,14 @@ def index():
     else:
         open_plan_html = f'<p class="meta">Opened manually for &ldquo;{escape(open_plan.plan_title)}&rdquo;.</p>'
 
+    live_session_state = read_live_session(DATA_DIR)
+    live_summary = (
+        f"projecting &ldquo;{escape(live_session_state.plan_title)}&rdquo; "
+        f"({escape(live_session_state.mode)} mode)."
+        if live_session_state
+        else "no session running."
+    )
+
     rules = RULE_STORE.load()
     return _STATUS_TEMPLATE.format(
         title_prefix=escape(TITLE_PREFIX),
@@ -521,6 +550,8 @@ def index():
         settings_url=url_for("admin.settings"),
         enabled_rule_count=sum(1 for r in rules if r.enabled),
         total_rule_count=len(rules),
+        live_summary=live_summary,
+        live_url=url_for("admin_live.live_index"),
     )
 
 
@@ -666,6 +697,11 @@ def delete_rule(rule_id: str):
 
 
 app.register_blueprint(admin_bp)
+
+# Live projection (/project, /remote, /admin/live). Shares this module's
+# _lock so a session/theme write can't interleave with an open/close or a
+# scheduler tick touching the same DATA_DIR.
+live_routes.init_app(app, live_routes.LiveContext(data_dir=DATA_DIR, session=SESSION, lock=_lock))
 
 
 # --------------------------------------------------------------------------

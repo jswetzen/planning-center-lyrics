@@ -2,9 +2,10 @@
 
 Pulls the song list + lyrics out of a Planning Center Services plan. The
 main thing here is a **self-hosted static lyrics site with a containerized
-admin+web deployment** (`static-site/`); a Notion-export script
-(`notion-export/`) and an untested live remote/wall-display proof of concept
-(`experimental/`) are also included.
+admin+web deployment** (`static-site/`), which also hosts a **live projector
++ remote synced to Planning Center's Services LIVE session**. A Notion-export
+script (`notion-export/`) and an older standalone remote/wall-display proof of
+concept (`experimental/`) are also included.
 
 In a hurry? See [QUICKSTART.md](QUICKSTART.md) to get the containerized site
 running. This file has the full picture, including the other two tools.
@@ -165,6 +166,58 @@ nothing already live, and only auto-closes a window it opened itself.
 means for this comparison; set it to your church's local timezone, since
 Planning Center's API returns times in UTC.
 
+### Live projection (admin UI)
+
+The admin UI's **Live projection** screen turns the same container into a
+projector + remote for an actual service, synced to Planning Center's own
+**Services LIVE** session. Pick a service type and a plan, start a session,
+and you get two URLs:
+
+- **the projector** (`/project/<token>`) -- full-screen lyrics for whatever
+  item Services LIVE currently has open. No password: it authenticates with
+  a long random token in its own URL, rotatable from the admin screen. It is
+  read-only, so a leaked link can't control anything.
+- **the remote** (`/remote`) -- Prev/Next, tap-a-song-to-jump, and a
+  black-on-white / white-on-black toggle for the projector. Gated by its own
+  `REMOTE_USERNAME`/`REMOTE_PASSWORD` (see `.env.example`), **separate from
+  the admin password** -- the person running the service doesn't need the
+  credential that can publish lyrics publicly.
+
+Three credentials, three different jobs:
+
+| Route | Who gets in | Can it write? |
+|---|---|---|
+| `/` | anyone | no |
+| `/project/<token>` | anyone with the link | no -- read-only by construction |
+| `/remote` | `REMOTE_PASSWORD` | drives the plan, only in control mode |
+| `/admin/*` | `ADMIN_PASSWORD` | everything |
+
+#### Follow mode vs. control mode
+
+A session always starts in **follow mode**: the app only *reads* Planning
+Center and mirrors it onto the projector. Whoever is running Services LIVE
+from their own iPad stays in charge and never notices the projector exists.
+
+**Control mode** is entered only by an explicit, confirmed click.
+
+> [!WARNING]
+> Planning Center allows exactly **one controller per plan**. Taking control
+> disconnects whoever currently has it, with no warning on their end. Don't
+> click "Take control" unless you're the one running the service. Stopping
+> the session releases control automatically, so it isn't left parked on a
+> projector after everyone's gone home.
+
+When a *non-song* item is live -- sermon, offering, announcements -- the
+projector goes blank rather than leaving the last song's lyrics up. If
+Planning Center becomes unreachable mid-service, the display holds its last
+frame instead of blanking, and the remote shows why.
+
+> [!NOTE]
+> The Services LIVE integration is written against Planning Center's
+> documented API but **has not been exercised against a real live service
+> yet** -- the unit tests cover the logic with recorded response shapes, not
+> the real thing. Try it on a plan nobody depends on before a Sunday.
+
 If your `podman` doesn't bundle a compose provider, install
 [`podman-compose`](https://github.com/containers/podman-compose) instead --
 `podman compose` transparently shells out to it. Plain `docker compose`
@@ -211,7 +264,15 @@ Open (or create) the destination page in Notion and paste the file's
 contents directly into the page body. Notion recognizes Markdown on paste
 and converts `#`/`##` into headings and `---` into a divider automatically.
 
-## Experimental: live remote + wall display
+## Experimental: standalone live remote + wall display
+
+> [!NOTE]
+> **Superseded by the admin UI's "Live projection" screen** (see above),
+> which does the same job inside the deployed container, syncs to Planning
+> Center's own Services LIVE session instead of keeping a private index, and
+> has real authentication. This standalone script is kept for the case where
+> you want a projector on a laptop with no container, no admin password, and
+> no Planning Center LIVE involvement at all.
 
 **Untested proof of concept -- this has not actually been run against a
 real plan/device pair yet.** Included for reference; expect rough edges,

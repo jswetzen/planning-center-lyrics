@@ -17,18 +17,27 @@ opened deliberately for a service" a first-class state instead of an afterthough
 reflects exactly what `state.txt`/`current/index.html` say, and only the `/admin` routes (and
 the scheduler) can change that.
 
-## One process, two route groups
+## One process, four route groups
 
 ```mermaid
 flowchart LR
     PCO[Planning Center API] -->|fetch songs/lyrics| GEN[generate_static_site.py]
+    PCO <-->|Services LIVE: poll + control| LIVER
     subgraph app[admin_app.py -- single container/process :9000]
         GEN
         PUBLIC["/  (public, no auth)"]
-        ADMINR["/admin/*  (Basic Auth)"]
+        ADMINR["/admin/*  (ADMIN_PASSWORD)"]
+        REMOTE["/remote/*  (REMOTE_PASSWORD)"]
+        PROJECT["/project/token  (URL token, read-only)"]
         SCHED[scheduler.py<br/>pure logic, no Flask]
+        LIVER[live_routes.py]
+        LIVES[live_session.py<br/>pure logic, no Flask]
         ADMINR --> GEN
         ADMINR <--> SCHED
+        ADMINR --> LIVER
+        REMOTE --> LIVER
+        PROJECT --> LIVER
+        LIVER <--> LIVES
     end
     subgraph data[DATA_DIR volume]
         SITE[site/index.html<br/>+ index.plan.json]
@@ -36,15 +45,25 @@ flowchart LR
         STATE[state.txt]
         OPENPLAN[open_plan.json]
         RULES[rules.json]
+        LIVEJSON[live_session.json]
+        TOKEN[display_token.txt]
     end
     GEN -->|writes| SITE
     ADMINR -->|copies on Open/regenerate-while-open| CURRENT
     ADMINR --> STATE
     ADMINR --> OPENPLAN
     SCHED --> RULES
+    LIVES --> LIVEJSON
+    LIVES --> TOKEN
     CURRENT -->|read| PUBLIC
     PUBLIC -->|public traffic| Internet
 ```
+
+The two features are independent: the open/closed state machine controls what the *public
+website* serves, while a projection session controls what the *projector in the room* shows.
+Starting a projection session does not open the public site, and vice versa — projecting lyrics
+in the room during a service is the straightforwardly licensed use, whereas leaving them on a
+public URL is the risk the open/closed toggle exists to manage.
 
 - **`/`** (no auth): read-only, and the only thing it does is return whatever
   `DATA_DIR/current/index.html` currently holds. It has no logic of its own to distinguish
@@ -79,7 +98,9 @@ DATA_DIR/
 │                          "come back Sunday" placeholder)
 ├── state.txt             "open" | "closed" (defaults to closed if missing/malformed)
 ├── open_plan.json        which plan is live right now + who opened it (see OpenPlan below)
-└── rules.json            configured automation rules + last-evaluated bookkeeping
+├── rules.json            configured automation rules + last-evaluated bookkeeping
+├── live_session.json     active projection session, if any (see Live projection below)
+└── display_token.txt     the projector's bearer token
 ```
 
 `site/` and `current/` are intentionally separate: **regenerate always refreshes `site/`**, but
@@ -183,12 +204,83 @@ itself (checked via `open_plan.opened_by == "automation"`) — it will never re-
 human just closed or auto-close something a human opened manually, because those states simply
 never match automation's own preconditions.
 
+## Live projection (`live_session.py` + `live_routes.py`)
+
+A second feature sharing the same process and `DATA_DIR`: a projector and a remote for an
+actual service, synced to Planning Center's own **Services LIVE** session (the thing a worship
+leader drives from the Services app). Same split as the scheduler — `live_session.py` is pure
+logic + JSON persistence with no Flask in it; `live_routes.py` owns the HTTP surface.
+
+```
+DATA_DIR/
+├── live_session.json    active projection session (plan ref, mode, theme)
+└── display_token.txt    the projector's bearer token
+```
+
+**Reading what's live is a two-hop indirection.** The `live` resource doesn't report the
+current *Item*; it reports a `current_item_time` relationship pointing at an **ItemTime**, and
+only the sideloaded ItemTime carries the link back to the plan item. `pco_client.get_live_status`
+does that resolution behind `include=current_item_time,next_item_time,controller` and hands
+callers plain item ids. This is also why `SongLyrics` gained an `item_id`: `collect_songs`
+previously discarded it, and without it there's no way to answer "is this the song on screen".
+
+**Follow vs. control.** A session always starts in `follow` mode, where the app has never
+written to Planning Center — it polls and mirrors, and whoever holds control keeps it.
+`control` mode is entered only through a confirmed click on `/admin/live`. This matters because
+Planning Center allows **exactly one controller per plan**, and `toggle_control` boots the
+incumbent with no warning on their end. Nothing takes control implicitly: not a page load, not
+a timer, not a Next press (`_require_control` returns 409 in follow mode rather than silently
+escalating). Stopping a session releases control, so it isn't left parked on a projector after
+the service.
+
+**Why the projector shows a blank rather than the last song**: Services LIVE walks the whole
+running order, so the current item is regularly a sermon or an announcement. `resolve_display`
+distinguishes four cases — `song`, `hold` (a known non-song item → blank), `waiting` (nothing
+live yet), and `stale` (Planning Center unreachable, or on an item this session's cache predates
+→ *keep the last frame*, since blanking a projector mid-song is worse than a few seconds of
+staleness). All four are unit-tested in `tests/test_live_session.py`.
+
+**Poll cost is fixed, not per-viewer.** The projector polls every 1.5s and the remote every 2s,
+and a church may have several of each open. `live_routes.poll_live` caches the Planning Center
+read for `LIVE_POLL_CACHE_SECONDS`, so API traffic doesn't scale with the number of open tabs
+and can't walk into a rate limit mid-service. The projector's polling path also deliberately
+avoids `admin_app._lock`, so it can't block behind a regenerate subprocess.
+
+**Tap-to-jump is a walk, not a seek.** Services LIVE exposes only `go_to_next_item` /
+`go_to_previous_item` — there is no absolute "go to item X". `steps_between` computes the delta
+across the *full* running order (a song-to-song jump usually crosses non-song items), and
+`MAX_JUMP_STEPS` caps how far one tap will walk so a mis-tap can't fire an unbounded burst of
+writes.
+
 ## Auth
 
-Every route under `/admin` goes through `_require_auth` (`@app.before_request`, gated on
-`request.path.startswith("/admin")`), checked with `secrets.compare_digest` (constant-time,
-avoids a timing side-channel on the credential comparison). `/` and `/healthz` are the only
-routes deliberately exempt. There is **no rate limiting or lockout** on failed attempts —
+Three credentials with three different jobs, all dispatched from the single `_require_auth`
+hook (`@app.before_request`) so every route's answer to "who gets in" is readable in one place:
+
+| Route | Gate | Write access |
+|---|---|---|
+| `/`, `/healthz` | none | none |
+| `/project/<token>` | token in the URL, checked in-route | **none** — no POST route exists under `/project` |
+| `/remote/*` | `REMOTE_PASSWORD` (separate credential) | drives Planning Center, control mode only |
+| `/admin/*` | `ADMIN_PASSWORD` | everything |
+
+`/remote` gets its own password rather than reusing the admin one because the person running a
+service from the back of the room shouldn't hold the credential that can publish copyrighted
+lyrics to the internet. An unset `REMOTE_PASSWORD` makes `/remote` return **503, not open** —
+missing config must never mean "no auth required".
+
+The projector gets a **token in its URL instead of a password** because it's an unattended
+browser on a booth machine several people can walk up to, with no practical way to log it out
+after a service. The token is rotatable from `/admin/live` (invalidating every existing display
+URL at once), and every route it reaches is a GET, so a leaked link can't advance the plan, take
+Planning Center control, or open the public site. The tradeoff, accepted deliberately: a URL
+token lands in browser history and proxy access logs. That's tolerable for a page whose entire
+content is lyrics the congregation is already looking at — it is **not** a pattern to extend to
+`/admin`. A wrong token returns 404, identical to an unknown URL, so probing can't confirm a
+display URL exists.
+
+Credential comparisons all use `secrets.compare_digest` (constant-time,
+avoids a timing side-channel on the credential comparison). There is **no rate limiting or lockout** on failed attempts —
 acceptable given the password is a long random string (see the mikro-iac deployment's secret
 generation), not something meant to be human-memorable, but worth knowing if this ever moves to
 a weaker/user-chosen password. The app refuses to even start (`main()`) without
@@ -210,9 +302,16 @@ Thin wrapper around the Planning Center Services REST API shared by every tool i
 (this admin app, the Notion export, the experimental remote display). Handles Basic Auth session
 setup, pagination (`api_get_all_pages`), and plan/song/arrangement lookups. `scheduler.py` uses
 `find_plan_by_date` + `get_plan_items` + `get_plan_times`; `generate_static_site.py` uses
-`find_upcoming_plan`/`find_plan_by_date` + `collect_songs` for the actual lyrics rendering.
-Nothing here is admin/web-app-specific — it has no knowledge of `DATA_DIR`, auth, or the
-open/closed concept.
+`find_upcoming_plan`/`find_plan_by_date` + `collect_songs` for the actual lyrics rendering;
+`live_routes.py` uses `get_live_status` + `live_take_control`/`live_go_to_*` and
+`get_plan_item_summaries`. Nothing here is admin/web-app-specific — it has no knowledge of
+`DATA_DIR`, auth, or the open/closed concept.
+
+`get_live_status` never raises: it's on a path polled every couple of seconds by a projector
+mid-service, so a transient failure returns `reachable=False` for the caller to hold its last
+frame, rather than an exception that would blank a screen. `live_take_control` /
+`live_release_control` read state before acting, because Planning Center only offers a raw
+`toggle_control` — a blind second call would hand control straight back.
 
 ## CI / build pipeline (`.github/workflows/docker-build.yml`)
 
@@ -220,8 +319,11 @@ Three jobs on every push/PR to `main`:
 
 - **`build`**: builds `static-site/Dockerfile` (confirms it still builds after a
   Dockerfile/dependency change) — not pushed anywhere by this job.
-- **`test`**: `uv run pytest` — currently the scheduler/state-machine logic
-  (`tests/test_scheduler.py`, `tests/test_admin_state_machine.py`).
+- **`test`**: `uv run pytest` — the scheduler/state-machine logic
+  (`tests/test_scheduler.py`, `tests/test_admin_state_machine.py`), the Planning Center client
+  including the Services LIVE response shapes (`tests/test_pco_client.py`), and the live
+  projection logic and route/auth boundaries (`tests/test_live_session.py`,
+  `tests/test_live_routes.py`).
 - **`publish`**: **push events to `main` only**, gated on `build`+`test` both passing. Builds
   and pushes the image to `ghcr.io/jswetzen/planning-center-lyrics`, tagged `:main` (moving) and
   `:sha-<commit>` (pinned).

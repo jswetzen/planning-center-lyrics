@@ -1,6 +1,7 @@
-# Serves both the public lyrics page ("/") and the Basic Auth-gated admin
-# UI ("/admin") that regenerates the site from Planning Center and toggles
-# it open/closed. See README.md's "Containerized deployment" section.
+# Serves the public lyrics page ("/"), the Basic Auth-gated admin UI
+# ("/admin") that regenerates the site from Planning Center and toggles it
+# open/closed, and the live projection display + remote ("/project",
+# "/remote"). See README.md's "Containerized deployment" section.
 
 FROM docker.io/library/python:3.12-alpine AS builder
 
@@ -17,7 +18,12 @@ RUN uv sync --frozen --no-install-project --no-dev
 COPY LICENSE README.md ./
 COPY src/ src/
 RUN uv sync --frozen --no-dev
-COPY static-site/generate_static_site.py static-site/admin_app.py static-site/scheduler.py ./
+# admin_app.py imports scheduler, live_routes and live_session as top-level
+# modules (they live in a scripts dir, not a package), so every one of them
+# has to land flat in /app -- a missing entry here is an ImportError at
+# container start, not a build failure.
+COPY static-site/generate_static_site.py static-site/admin_app.py static-site/scheduler.py \
+     static-site/live_session.py static-site/live_routes.py ./
 
 FROM docker.io/library/python:3.12-alpine
 

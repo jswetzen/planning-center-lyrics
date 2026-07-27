@@ -282,6 +282,131 @@ across the *full* running order (a song-to-song jump usually crosses non-song it
 `MAX_JUMP_STEPS` caps how far one tap will walk so a mis-tap can't fire an unbounded burst of
 writes.
 
+## Lyric shaping (`pco_client`)
+
+`split_stanzas`, `looks_like_section_label`, `dedupe_stanzas` and `wrap_lines` live in
+`pco_client` next to `clean_text`/`SongLyrics`, because the projector and the PowerPoint export
+both need the same answer to "what is a screenful". They are **projection-specific** and
+deliberately not applied to `/` or the Notion export: those are reading and reference surfaces
+where `CHORUS:` is useful navigation and the band wants the structure.
+
+Every threshold below came from a corpus of **19 distinct songs / 511 lines across five
+Sundays** on this account, not from guesswork.
+
+### Why the projector needs this at all
+
+Services LIVE reports which *item* is current, never which stanza, so there is nothing to page
+through — the whole song shares one screen and the only lever on legibility is line count. (The
+whole-song constraint is also a deliberate workflow choice: the musician playing is often the
+one running projection, so nobody is free to advance stanzas. Following Music Stand's own
+sub-item position would solve it, but that's a private API.)
+
+Measured on the corpus, counting both before and after *after* wrapping at the same width, so
+it's a fair comparison — the old page was already being wrapped by the browser, just at
+arbitrary points:
+
+| | visual lines |
+|---|---|
+| before | 579 |
+| after | **448** (23% fewer) |
+
+No song came out worse. Section labels reaching the projector went from 3 to **0**, and the
+longest line from 76 characters to 42.
+
+### Section labels
+
+The corpus vocabulary is wider than an English-only guess would produce: `REFRÄNG:`, `VERS 1:`,
+`STICK:`, `BRYGGA:`, `VAMP:`, `MELLANSPEL:`, `INSTRUMENTALT:`, plus compounds like
+`INTRO/INSTRUMENTAL:` — in upper and title case, with and without colons.
+
+`looks_like_section_label` is deliberately conservative: anchored, capped at 24 characters, and
+every token must be a known structural word. **A false positive deletes a lyric silently, which
+is far worse than leaving a stray `TAG:` on a wall.** The corpus case that justifies the caution
+is `(Allt som du har sagt)` — a backing-vocal line a looser matcher would eat.
+
+The known consequence, documented in the tests: a lyric line consisting of exactly one
+structural word (`chorus`) is stripped. Requiring punctuation would fix it but would miss the
+bare `INTRO` the corpus actually contains, so the trade goes this way.
+
+**Labels also act as stanza breaks.** 3 of 86 labels in the corpus sat mid-block with no blank
+line before them; treating them as plain text both left the marker on screen *and* merged two
+sections into a single slide in the deck.
+
+### De-duplication — projector only
+
+5 of 19 songs repeat a stanza verbatim, and for those it removes up to 40% of the lines. It runs
+for `/live` and **not** for the deck: a deck is advanced slide by slide, so a chorus sung three
+times needs three slides, and collapsing them would break the running order mid-service. Exact
+matches only after case/whitespace/punctuation folding — near-duplicates are left alone, since
+guessing there risks dropping a verse that merely rhymes with another.
+
+### Line breaking
+
+Median longest-line in the corpus is 44 characters, max 76, with 68 lines over the 42-character
+threshold. The first implementation preferred punctuation nearest the middle and produced a
+**21/53** split on a 75-character line — worse than breaking at the midpoint space. `_best_break`
+therefore tries sentence end, then clause punctuation, then any space, but **only accepts a
+candidate that leaves both halves at least 35% of the line**. On real lyrics that lands the
+break where a singer breathes:
+
+```
+Änglar sjung - er ut, he - e - lig. Hela skapel - sen sjunger he - e - lig.
+  ->  Änglar sjung - er ut, he - e - lig.        (35)
+      Hela skapel - sen sjunger he - e - lig.    (39)
+```
+
+A run with nowhere balanced to break is left long rather than mangled.
+
+### What this does not fix
+
+**Vilket underbart namn** is 42 lines even after shaping — roughly 18px on a 1080p screen. No
+amount of text shaping makes a song that long readable from the back of a room while it all
+shares one screen. The only lever that changes that ceiling without paging is a two-column
+layout above a line threshold, and it's a partial win at best: halving the column width forces
+more wrapping back.
+
+## PowerPoint export (`pptx_export.py`)
+
+Same shape as the other two logic modules: **no Flask**, takes `SongLyrics` and returns bytes,
+so slide-splitting and font-sizing are unit-tested without a server (`tests/test_pptx_export.py`).
+`admin_app.py` owns the route (`/admin/export`, `/admin/export/pptx`) and the plan lookup.
+
+**Stateless on purpose.** The export writes nothing to `DATA_DIR` and touches no session, so it
+can't interact with the open/closed machinery or a running projection — a test asserts the data
+directory is byte-identical before and after an export.
+
+**One slide per stanza.** The unit of projection is a screenful, not a song. Planning Center
+stores lyrics as blank-line-separated stanzas, which is that unit already, so the split follows
+the document's own structure rather than guessing at one.
+
+**Section labels are stripped**, and this is not cosmetic: real songs on this account start
+stanzas with `VERSE 1:`, `CHORUS:`, `TAG:`, `BRIDGE:`. Those are notes for the band, and
+projecting them at a congregation is a visible mistake. `looks_like_section_label` is
+deliberately conservative — anchored, length-capped (≤24 chars), and only ever applied to the
+*first* line of a stanza — so "Bridge over troubled water" stays a lyric. Swedish labels
+(`Refräng`, `Vers`, `Brygga`, `Omkväde`) are recognized too, since that's what these songs are
+written in.
+
+**Font sizes are estimated, not measured.** PowerPoint lays text out itself using fonts this
+code can't see, and python-pptx's `fit_text()` needs font files present at render time —
+unreliable in an Alpine container. `choose_font_size` applies a width constraint (longest line)
+and a height constraint (line count) and takes the smaller, clamped to 18–54pt. The floor
+matters more than the ceiling: below ~18pt the back row is squinting, so an over-long stanza is
+better left slightly overflowing — visibly needing a manual split — than silently shrunk to
+unreadable.
+
+**`.pptx` only.** Keynote imports it; there is no writable Keynote format (`.key` is an
+undocumented macOS-only bundle), so "export to Keynote" is served by handing Keynote a `.pptx`.
+
+The CCLI number goes in the footer of *every* slide rather than on a title slide, because
+reporting what was projected is the licence-holder's obligation and a number that only exists in
+Planning Center is one nobody will transcribe afterwards.
+
+This adds the repo's first dependency beyond flask/requests/dotenv (`python-pptx`, which pulls
+lxml and Pillow). Those need compiling on Alpine/musl; the Dockerfile's builder stage already
+installs `gcc`/`musl-dev` for exactly this case, and the image has been confirmed to build and
+produce a valid deck.
+
 ## Auth
 
 Three credentials with three different jobs, all dispatched from the single `_require_auth`
@@ -406,7 +531,8 @@ Three jobs on every push/PR to `main`:
 
 - **`build`**: builds `static-site/Dockerfile` (confirms it still builds after a
   Dockerfile/dependency change) — not pushed anywhere by this job.
-- **`test`**: `uv run pytest` — the scheduler/state-machine logic
+- **`test`**: `uv run pytest` — the PowerPoint export (`tests/test_pptx_export.py`), the
+  scheduler/state-machine logic
   (`tests/test_scheduler.py`, `tests/test_admin_state_machine.py`), the Planning Center client
   including the Services LIVE response shapes (`tests/test_pco_client.py`), and the live
   projection logic and route/auth boundaries (`tests/test_live_session.py`,

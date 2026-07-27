@@ -9,6 +9,8 @@ static-site/generate_static_site.py, and experimental/remote_display.py.
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Optional
@@ -607,6 +609,215 @@ def live_release_control(session: requests.Session, service_type_id: str, plan_i
 # --------------------------------------------------------------------------
 # Song/lyrics assembly
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Lyric text shaping
+#
+# Shared by the live projector (static-site/live_session.py) and the
+# PowerPoint export (static-site/pptx_export.py), which need the same
+# decisions about what a "screenful" is. Lives here, next to clean_text and
+# SongLyrics, so neither consumer owns logic the other depends on.
+#
+# Deliberately NOT applied to the public static site or the Notion export:
+# those are reading/reference surfaces, where "CHORUS:" is useful navigation
+# and structure the band actually wants. This is projection-specific.
+#
+# The vocabulary and the thresholds below were derived from a real corpus of
+# 19 songs / 511 lines across five Sundays on this account, not guessed --
+# see ARCHITECTURE.md for the measurements.
+# --------------------------------------------------------------------------
+
+# Structural markers the band reads and a congregation must never see on a
+# wall. Swedish included because that's what these songs are written in;
+# `mellanspel`/`instrumentalt` were found missing against the real corpus.
+_SECTION_WORDS = {
+    "verse", "chorus", "pre-chorus", "prechorus", "bridge", "tag", "intro", "outro",
+    "interlude", "instrumental", "ending", "refrain", "vamp", "turnaround", "coda",
+    "vers", "refräng", "refrang", "brygga", "stick", "omkväde", "omkvade", "slut",
+    "mellanspel", "instrumentalt", "förspel", "forspel", "efterspel", "komp", "slutspel",
+}
+
+# Longer than this and it's a lyric, not a marker. "Bridge over troubled
+# water" (26) has to fall on the safe side of this line.
+_MAX_LABEL_CHARS = 24
+
+# One token of a label: an optional word plus an optional number, or a bare
+# number so "Verse 1 & 2" reads as two tokens rather than failing on "2".
+_LABEL_TOKEN_RE = re.compile(r"^([A-Za-zÅÄÖÆØÅåäöæøé\-]+)?\s*(\d+|[IVXivx]+)?$")
+
+
+def looks_like_section_label(line: str) -> bool:
+    """Whether a line is a structural marker rather than something to sing.
+
+    Conservative on purpose: anchored, length-capped, and every token has to
+    be a known structural word. A false positive deletes a lyric silently,
+    which is far worse than leaving a stray "TAG:" on screen. Verified
+    against the corpus to reject e.g. "(Allt som du har sagt)", a backing
+    vocal line a looser matcher would eat.
+    """
+    stripped = line.strip()
+    if not stripped or len(stripped) > _MAX_LABEL_CHARS:
+        return False
+
+    # Peel off wrapping brackets, trailing punctuation, and a repeat marker
+    # ("Chorus x2", "Bridge (2x)").
+    inner = re.sub(r"^[\[\(]\s*|\s*[\]\)]$", "", stripped).strip()
+    inner = inner.rstrip(":.").strip()
+    inner = re.sub(r"\s*\(?\d*\s*[xX]\s*\d*\)?$", "", inner).strip()
+    if not inner:
+        return False
+
+    # Compounds: "INTRO/INSTRUMENTAL:", "Verse 1 & 2".
+    tokens = [t.strip() for t in re.split(r"[/&+,]", inner) if t.strip()]
+    if not tokens:
+        return False
+
+    for token in tokens:
+        match = _LABEL_TOKEN_RE.match(token)
+        if not match:
+            return False
+        word, number = match.group(1), match.group(2)
+        if word is None:
+            if number is None:
+                return False
+            continue  # bare "2" in "Verse 1 & 2"
+        if word.lower() not in _SECTION_WORDS:
+            return False
+    return True
+
+
+def split_stanzas(text: str, strip_labels: bool = True) -> list[str]:
+    """Split lyrics into one chunk per projected screenful.
+
+    Blank lines separate stanzas -- Planning Center's own convention. A
+    section label *also* starts a new stanza and is then dropped, which
+    matters because labels are not reliably preceded by a blank line: 3 of
+    86 labels in the corpus sit mid-block, and treating those as mere text
+    both left the marker on screen and merged two sections into one slide.
+    """
+    if not text or not text.strip():
+        return []
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    stanzas: list[str] = []
+
+    def flush(buffer: list[str]) -> None:
+        if buffer:
+            stanzas.append("\n".join(buffer))
+
+    for block in re.split(r"\n\s*\n", normalized):
+        # Stripped both ends: slides are centre-aligned, so hand-typed
+        # indentation is invisible noise that only skews the longest-line
+        # measurement the font sizing depends on.
+        current: list[str] = []
+        for raw_line in block.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if strip_labels and looks_like_section_label(line):
+                flush(current)
+                current = []
+                continue
+            current.append(line)
+        flush(current)
+
+    return stanzas
+
+
+def _comparison_key(stanza: str) -> str:
+    """Normalized form for "is this the same stanza again?"."""
+    folded = unicodedata.normalize("NFKC", stanza).lower()
+    folded = re.sub(r"[^\w\s]", "", folded)
+    return re.sub(r"\s+", " ", folded).strip()
+
+
+def dedupe_stanzas(stanzas: list[str]) -> list[str]:
+    """Drop repeated stanzas, keeping the first occurrence.
+
+    For the **projector only**, where the whole song sits on one screen and a
+    chorus printed three times just steals room from the font size: 5 of 19
+    songs in the corpus repeat a stanza verbatim, and for those it removes up
+    to 40% of the lines.
+
+    Emphatically *not* for the PowerPoint deck, which is advanced slide by
+    slide -- a chorus sung three times needs three slides there, and
+    collapsing them would break the running order mid-service.
+
+    Exact matches only (after case/whitespace/punctuation folding). A chorus
+    with one word changed is left alone: guessing at near-duplicates risks
+    dropping a verse that merely rhymes with another.
+    """
+    seen: set[str] = set()
+    kept: list[str] = []
+    for stanza in stanzas:
+        key = _comparison_key(stanza)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(stanza)
+    return kept
+
+
+# Lines longer than this get broken. Chosen from the corpus: the median
+# song's longest line is 44 characters, so this splits the genuine outliers
+# without touching most lyrics.
+DEFAULT_WRAP_CHARS = 42
+
+# Neither half of a break may be smaller than this share of the line. Without
+# it, "prefer punctuation nearest the middle" picks an early comma and
+# produces a 21/53 split -- worse than breaking at the midpoint space, which
+# is exactly what the first version of this did.
+_MIN_BALANCE_SHARE = 0.35
+
+
+def _best_break(line: str) -> Optional[int]:
+    """Index to break a too-long line at, or None if there's nowhere good.
+
+    Sentence end, then clause punctuation, then any space -- but a candidate
+    only counts if it leaves both halves reasonably balanced. On real lyrics
+    this lands the break where a singer breathes.
+    """
+    length, middle = len(line), len(line) / 2
+
+    def balanced(index: int) -> bool:
+        return min(index, length - index) >= _MIN_BALANCE_SHARE * length
+
+    for pattern in (r"[.!?]\s", r"[,;:]\s"):
+        candidates = [m.end() for m in re.finditer(pattern, line) if balanced(m.end())]
+        if candidates:
+            return min(candidates, key=lambda i: abs(i - middle))
+
+    spaces = [m.start() for m in re.finditer(r"\s", line) if balanced(m.start())]
+    if spaces:
+        return min(spaces, key=lambda i: abs(i - middle))
+    return None
+
+
+def wrap_line(line: str, limit: int = DEFAULT_WRAP_CHARS) -> list[str]:
+    """Break one long line into balanced pieces at sensible points.
+
+    This costs no screen space that wasn't already being lost: a line too
+    long for the display was being wrapped by the browser anyway, just at an
+    arbitrary point. All this decides is *where*.
+    """
+    line = line.strip()
+    if len(line) <= limit:
+        return [line]
+    index = _best_break(line)
+    if index is None:
+        return [line]  # one unbreakable run; better long than mangled
+    head, tail = line[:index].strip(), line[index:].strip()
+    if not head or not tail:
+        return [line]
+    return wrap_line(head, limit) + wrap_line(tail, limit)
+
+
+def wrap_lines(text: str, limit: int = DEFAULT_WRAP_CHARS) -> str:
+    """wrap_line applied to every line of a stanza."""
+    return "\n".join(
+        piece for line in text.split("\n") for piece in wrap_line(line, limit)
+    )
 
 
 def clean_text(text: str) -> str:

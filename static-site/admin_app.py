@@ -12,7 +12,12 @@ Single Flask app that serves both halves of the lyrics site:
                  generated page and the placeholder, plus a rule-based
                  scheduler (see scheduler.py) that does the same open/close
                  automatically, driven by each configured service type's
-                 actual plan data for today.
+                 actual plan data for today. Also hosts the live projection
+                 console (live_routes.py) and the PowerPoint export
+                 (pptx_export.py).
+    /live        public projector/phone view of the currently-live song,
+                 served only while the site is open (live_routes.py)
+    /remote      the operator's controller for a projection session
 
 This exists because song lyrics are only licensed (via CCLI) to be
 displayed for the service they're used in -- leaving the generated page up
@@ -59,6 +64,7 @@ in the environment (or a .env file). Optional: SCHEDULER_POLL_SECONDS
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -77,8 +83,17 @@ from dotenv import load_dotenv
 from flask import Blueprint, Flask, Response, redirect, request, send_file, url_for
 
 import live_routes
+import pptx_export
 from live_session import read_session as read_live_session
-from pco_client import PlanningCenterError, build_session, list_service_types
+from pco_client import (
+    PlanningCenterError,
+    build_session,
+    collect_songs,
+    get_plan_by_id,
+    list_selectable_plans,
+    list_service_types,
+    plan_display_title,
+)
 from scheduler import OpenPlan, RuleStore, clear_open_plan, evaluate_rule, read_open_plan, write_open_plan
 
 log = logging.getLogger("admin_app")
@@ -125,11 +140,10 @@ def _require_auth():
         /admin/*     ADMIN_PASSWORD.
         /remote/*    ADMIN_PASSWORD, the same credential and the same Basic
                      Auth realm -- deliberately, see below.
-        /project/*   No password. Gated by the unguessable token in its own
-                     URL, checked inside the route (live_routes) because the
-                     token is a path segment rather than a header. Read-only
-                     by construction -- see live_session.py's module docstring
-                     for why the projector gets a token instead of a password.
+        /live        No password, and nothing to gate: it shows one song and
+                     only while the site is open, so it serves strictly less
+                     than "/" already does. See live_session.py's module
+                     docstring.
         everything   "/" (the public page or placeholder) and "/healthz" are
         else         deliberately open.
 
@@ -147,7 +161,8 @@ def _require_auth():
     One credential and one realm removes the ambiguity outright. The
     least-privilege split is worth revisiting if this ever moves to
     cookie-based login, where two identities on one origin actually work --
-    the projector's token is unaffected either way.
+    the public /live route is unaffected either way, having no credential to
+    collide with.
     """
     path = request.path
     if not path.startswith("/admin") and not path.startswith("/remote"):
@@ -246,6 +261,7 @@ _STATUS_TEMPLATE = """<!doctype html>
 <form method="post" action="{close_url}"><button class="secondary">Close (serve placeholder)</button></form>
 <p class="meta">Automation: {enabled_rule_count}/{total_rule_count} rule(s) enabled. <a href="{settings_url}">Manage rules &rarr;</a></p>
 <p class="meta">Live projection: {live_summary} <a href="{live_url}">Open &rarr;</a></p>
+<p class="meta">Slides: <a href="{export_url}">Export a plan to PowerPoint &rarr;</a></p>
 </body>
 </html>
 """
@@ -566,6 +582,7 @@ def index():
         total_rule_count=len(rules),
         live_summary=live_summary,
         live_url=url_for("admin_live.live_index"),
+        export_url=url_for("admin.export_page"),
     )
 
 
@@ -708,6 +725,149 @@ def delete_rule(rule_id: str):
     with _lock:
         RULE_STORE.delete(rule_id)
     return redirect(url_for("admin.settings"))
+
+
+_EXPORT_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Site Admin &mdash; PowerPoint export</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ margin: 0 auto; max-width: 40em; padding: 2rem 1.25rem 4rem;
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.5; color: #1a1a1a; background: #fff; }}
+  @media (prefers-color-scheme: dark) {{ body {{ color: #eee; background: #111; }} }}
+  h1 {{ font-size: 1.4rem; }}
+  a {{ color: #2d6cdf; }}
+  .error {{ color: #d33; }}
+  .meta {{ color: #777; font-size: 0.9rem; }}
+  label {{ display: block; margin: 0.9rem 0 0.2rem; font-weight: 700; font-size: 0.9rem; }}
+  select {{ font-size: 1rem; padding: 0.4em; max-width: 100%; }}
+  button {{ font-size: 0.95rem; padding: 0.5em 1.1em; margin-top: 1.2rem;
+    border: none; border-radius: 8px; background: #2d6cdf; color: #fff; font-weight: 700; }}
+  fieldset {{ border: none; padding: 0; margin: 0.6rem 0 0; }}
+  fieldset label {{ display: inline; font-weight: 400; margin-right: 1.1em; }}
+</style>
+</head>
+<body>
+<h1>Export to PowerPoint</h1>
+<p><a href="{index_url}">&larr; Back to status</a></p>
+{error_html}
+<form method="get" action="{self_url}">
+  <label for="st">Service type</label>
+  <select id="st" name="service_type_id" onchange="this.form.submit()" required>
+    <option value="" disabled{st_unselected}>Choose a service type&hellip;</option>
+    {service_type_options}
+  </select>
+  <noscript><button type="submit">List plans</button></noscript>
+</form>
+<form method="post" action="{export_url}">
+  <input type="hidden" name="service_type_id" value="{selected_st}">
+  <label for="plan">Plan</label>
+  <select id="plan" name="plan_id" required{plan_disabled}>
+    <option value="" disabled selected>Choose a plan&hellip;</option>
+    {plan_options}
+  </select>
+  <fieldset>
+    <label><input type="radio" name="theme" value="dark" checked> White on black</label>
+    <label><input type="radio" name="theme" value="light"> Black on white</label>
+  </fieldset>
+  <fieldset>
+    <label><input type="checkbox" name="strip_labels" value="1" checked>
+      Drop &ldquo;Verse 1&rdquo;/&ldquo;Refr&auml;ng&rdquo; section labels</label>
+  </fieldset>
+  <button type="submit">Download .pptx</button>
+</form>
+<p class="meta">One slide per stanza, 16:9, with each song&rsquo;s CCLI number in the footer.
+Opens in Keynote too (File &rarr; Open) &mdash; there&rsquo;s no writable Keynote format, so
+.pptx is the way in. Font sizes are estimated per slide; a very long stanza may still want
+splitting by hand.</p>
+</body>
+</html>
+"""
+
+
+@admin_bp.route("/export")
+def export_page():
+    selected_st = request.args.get("service_type_id", "").strip()
+    error = request.args.get("error")
+
+    try:
+        service_types = list_service_types(SESSION)
+    except PlanningCenterError as exc:
+        service_types, error = [], error or f"Could not load service types: {exc}"
+
+    plan_options = ""
+    if selected_st:
+        try:
+            plan_options = "\n".join(
+                f'<option value="{escape(p["id"])}">{escape(plan_display_title(p))}</option>'
+                for p in list_selectable_plans(SESSION, selected_st)
+            )
+        except PlanningCenterError as exc:
+            error = error or f"Could not load plans: {exc}"
+        if not plan_options and not error:
+            plan_options = '<option value="" disabled>No upcoming plans with a scheduled time</option>'
+
+    return _EXPORT_TEMPLATE.format(
+        index_url=url_for("admin.index"),
+        self_url=url_for("admin.export_page"),
+        export_url=url_for("admin.export_pptx"),
+        error_html=f'<p class="error">{escape(error)}</p>' if error else "",
+        selected_st=escape(selected_st),
+        st_unselected="" if selected_st else " selected",
+        service_type_options="\n".join(
+            f'<option value="{escape(st["id"])}"'
+            f'{" selected" if st["id"] == selected_st else ""}>'
+            f'{escape(st["attributes"].get("name") or st["id"])}</option>'
+            for st in service_types
+        ),
+        plan_options=plan_options,
+        plan_disabled="" if plan_options else " disabled",
+    )
+
+
+@admin_bp.route("/export/pptx", methods=["POST"])
+def export_pptx():
+    """Build and hand back a deck. Deliberately holds no state: nothing is
+    written to DATA_DIR, so this can't interact with the open/closed machinery
+    or a running projection session."""
+    service_type_id = request.form.get("service_type_id", "").strip()
+    plan_id = request.form.get("plan_id", "").strip()
+    theme = request.form.get("theme", pptx_export.DEFAULT_THEME)
+    strip_labels = bool(request.form.get("strip_labels"))
+
+    if not service_type_id or not plan_id:
+        return redirect(url_for("admin.export_page", error="Choose a service type and a plan."))
+
+    try:
+        _, plan = get_plan_by_id(SESSION, plan_id, service_type_id)
+        songs = collect_songs(SESSION, service_type_id, plan_id, include_pdf_links=False)
+    except PlanningCenterError as exc:
+        return redirect(url_for("admin.export_page", service_type_id=service_type_id, error=str(exc)))
+
+    if not songs:
+        return redirect(
+            url_for(
+                "admin.export_page",
+                service_type_id=service_type_id,
+                error=f"{plan_display_title(plan)} has no songs to export.",
+            )
+        )
+
+    data = pptx_export.build_deck_bytes(songs, theme=theme, strip_labels=strip_labels)
+    sort_date = (plan.get("attributes", {}).get("sort_date") or "")[:10] or None
+    filename = pptx_export.suggest_filename(TITLE_PREFIX, sort_date)
+    log.info("Exported %d song(s) from plan %s to %s", len(songs), plan_id, filename)
+
+    return send_file(
+        io.BytesIO(data),
+        mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 app.register_blueprint(admin_bp)

@@ -51,7 +51,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
-from pco_client import LiveStatus, PlanItem, SongLyrics
+from pco_client import (
+    LiveStatus,
+    PlanItem,
+    SongLyrics,
+    dedupe_stanzas,
+    split_stanzas,
+    wrap_lines,
+)
 
 log = logging.getLogger("live_session")
 
@@ -125,6 +132,31 @@ def clear_session(data_dir: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+def project_lyrics(song: SongLyrics) -> str:
+    """Shape one song's lyrics for the projector.
+
+    Three passes, all of which exist to buy font size, because the whole song
+    shares one screen (Services LIVE reports which *item* is current, never
+    which stanza, so there is nothing to page through):
+
+    1. **Strip section labels** -- band notes like "VERSE 1:"/"REFRÄNG:" must
+       never appear on a wall, and they were 16% of lines in the corpus.
+    2. **Drop repeated stanzas** -- a chorus printed three times only steals
+       room here, unlike in the deck where each repeat is a slide of its own.
+    3. **Break over-long lines at sensible points** -- the browser was
+       already wrapping them, just wherever the edge happened to fall.
+
+    Together these took a 19-song corpus from 511 lines to 397. Long songs
+    still end up small; that's inherent to showing a whole song at once.
+    """
+    stanzas = dedupe_stanzas(split_stanzas(song.plain_lyrics, strip_labels=True))
+    if not stanzas:
+        # Preserves body()'s "_No lyrics found..._" note rather than blanking
+        # a song the plan says should be on screen.
+        return song.body(include_chords=False)
+    return "\n\n".join(wrap_lines(stanza) for stanza in stanzas)
+
+
 @dataclass
 class PlanCache:
     """A plan's running order plus the lyrics for its songs.
@@ -136,12 +168,18 @@ class PlanCache:
 
     items: list[PlanItem] = field(default_factory=list)
     songs_by_item_id: dict[str, SongLyrics] = field(default_factory=dict)
+    # Projector-ready text, computed once here rather than on every poll --
+    # the display asks for this ~every 1.5s and the shaping never changes
+    # between refetches of the plan.
+    projected_by_item_id: dict[str, str] = field(default_factory=dict)
 
     @staticmethod
     def build(items: list[PlanItem], songs: list[SongLyrics]) -> "PlanCache":
+        by_item_id = {s.item_id: s for s in songs if s.item_id}
         return PlanCache(
             items=items,
-            songs_by_item_id={s.item_id: s for s in songs if s.item_id},
+            songs_by_item_id=by_item_id,
+            projected_by_item_id={i: project_lyrics(s) for i, s in by_item_id.items()},
         )
 
     @property
@@ -250,7 +288,7 @@ def resolve_display(cache: PlanCache, live: LiveStatus) -> DisplayState:
     return DisplayState(
         status="song",
         title=song.title,
-        lyrics=song.body(include_chords=False),
+        lyrics=cache.projected_by_item_id.get(item.id, song.body(include_chords=False)),
         ccli_number=song.ccli_number,
         item_id=item.id,
         song_position=position,

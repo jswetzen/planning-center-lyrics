@@ -29,6 +29,7 @@ running. This file has the full picture, including the other two tools.
 ```
 src/pco_client/       Shared Planning Center API client (used by everything below)
 static-site/          Main feature: static HTML site + admin/web Flask app + compose
+                      (also: live projection, remote, and PowerPoint export)
 notion-export/        Notion-ready Markdown export (the original script)
 experimental/         Live remote/wall display -- untested proof of concept
 ```
@@ -138,6 +139,36 @@ service, and close it again afterwards. The generated site itself is served
 at `http://<host>:9000/`; put a reverse proxy in front of that port for a
 real domain + TLS.
 
+### PowerPoint / Keynote export
+
+**Admin UI &rarr; "Export a plan to PowerPoint"** (`/admin/export`) builds a
+`.pptx` deck from any upcoming plan: pick a service type and plan, choose
+white-on-black or black-on-white, and download.
+
+- **One slide per stanza**, not per song -- the unit of projection is a
+  screenful, and Planning Center's blank-line-separated lyrics are already
+  exactly that.
+- **Section labels are dropped.** Real plans on this account carry
+  `VERSE 1:`, `CHORUS:`, `TAG:`, `BRIDGE:` (and Swedish `Refräng`, `Vers`,
+  `Brygga`) as the first line of a stanza -- notes for the band that must not
+  end up on a screen the congregation is reading. Uncheck the box to keep
+  them.
+- **16:9**, with each song's **CCLI number in the footer of every slide** --
+  reporting what was projected is the licence-holder's job, and a number that
+  only lives in Planning Center won't be transcribed afterwards.
+- Songs with no lyrics in Planning Center still get a `[Song title]`
+  placeholder slide, so a gap is obvious in the deck rather than discovered
+  mid-service.
+
+**Keynote**: open the `.pptx` with File &rarr; Open and Keynote converts it.
+There's no writable Keynote format -- `.key` is an undocumented macOS-only
+bundle -- so handing Keynote a `.pptx` is what "export to Keynote" means here.
+
+Font sizes are *estimated* per slide from the longest line and the line
+count, because PowerPoint does its own text layout with fonts this code can't
+measure. Decks come out consistent, but a very long stanza may still want
+splitting by hand.
+
 ### Automation (scheduled open/close)
 
 The admin UI's "Manage rules" screen lets you configure automation rules --
@@ -224,6 +255,31 @@ When a *non-song* item is live -- sermon, offering, announcements -- the
 projector goes blank rather than leaving the last song's lyrics up. If
 Planning Center becomes unreachable mid-service, the display holds its last
 frame instead of blanking, and the remote shows why.
+
+#### How lyrics are shaped for the projector
+
+Services LIVE reports which *item* is current, never which stanza, so the
+whole song shares one screen and the only lever on legibility is line count.
+Three passes buy that back, measured across five Sundays of real plans (19
+songs, 579 visual lines &rarr; **448**, 23% fewer, with no song coming out
+worse):
+
+- **Section labels are stripped** -- `VERSE 1:`, `REFRÄNG:`, `STICK:` and
+  friends are notes for the band, not something to project. A label also acts
+  as a stanza break, since they aren't reliably preceded by a blank line.
+- **Repeated stanzas are collapsed** -- a chorus printed three times only
+  steals room here. (The PowerPoint deck deliberately keeps repeats: it's
+  advanced slide by slide, so each repeat needs its own slide.)
+- **Over-long lines are broken at sensible points** -- sentence end, then
+  clause punctuation, then a space, preferring balanced halves. This costs no
+  space that wasn't already being lost; the browser was wrapping those lines
+  anyway, just wherever the edge fell.
+
+The public site (`/`) and the Notion export keep their section labels on
+purpose: those are for reading and for the band, where the structure helps.
+
+Long songs are still small -- a 42-line song lands around 18px on a 1080p
+screen -- which is inherent to showing a whole song at once.
 
 > [!NOTE]
 > The Services LIVE integration **has been exercised end-to-end against a

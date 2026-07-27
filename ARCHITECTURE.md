@@ -282,6 +282,89 @@ across the *full* running order (a song-to-song jump usually crosses non-song it
 `MAX_JUMP_STEPS` caps how far one tap will walk so a mis-tap can't fire an unbounded burst of
 writes.
 
+## Lyric shaping (`pco_client`)
+
+`split_stanzas`, `looks_like_section_label`, `dedupe_stanzas` and `wrap_lines` live in
+`pco_client` next to `clean_text`/`SongLyrics`, because the projector and the PowerPoint export
+both need the same answer to "what is a screenful". They are **projection-specific** and
+deliberately not applied to `/` or the Notion export: those are reading and reference surfaces
+where `CHORUS:` is useful navigation and the band wants the structure.
+
+Every threshold below came from a corpus of **19 distinct songs / 511 lines across five
+Sundays** on this account, not from guesswork.
+
+### Why the projector needs this at all
+
+Services LIVE reports which *item* is current, never which stanza, so there is nothing to page
+through — the whole song shares one screen and the only lever on legibility is line count. (The
+whole-song constraint is also a deliberate workflow choice: the musician playing is often the
+one running projection, so nobody is free to advance stanzas. Following Music Stand's own
+sub-item position would solve it, but that's a private API.)
+
+Measured on the corpus, counting both before and after *after* wrapping at the same width, so
+it's a fair comparison — the old page was already being wrapped by the browser, just at
+arbitrary points:
+
+| | visual lines |
+|---|---|
+| before | 579 |
+| after | **448** (23% fewer) |
+
+No song came out worse. Section labels reaching the projector went from 3 to **0**, and the
+longest line from 76 characters to 42.
+
+### Section labels
+
+The corpus vocabulary is wider than an English-only guess would produce: `REFRÄNG:`, `VERS 1:`,
+`STICK:`, `BRYGGA:`, `VAMP:`, `MELLANSPEL:`, `INSTRUMENTALT:`, plus compounds like
+`INTRO/INSTRUMENTAL:` — in upper and title case, with and without colons.
+
+`looks_like_section_label` is deliberately conservative: anchored, capped at 24 characters, and
+every token must be a known structural word. **A false positive deletes a lyric silently, which
+is far worse than leaving a stray `TAG:` on a wall.** The corpus case that justifies the caution
+is `(Allt som du har sagt)` — a backing-vocal line a looser matcher would eat.
+
+The known consequence, documented in the tests: a lyric line consisting of exactly one
+structural word (`chorus`) is stripped. Requiring punctuation would fix it but would miss the
+bare `INTRO` the corpus actually contains, so the trade goes this way.
+
+**Labels also act as stanza breaks.** 3 of 86 labels in the corpus sat mid-block with no blank
+line before them; treating them as plain text both left the marker on screen *and* merged two
+sections into a single slide in the deck.
+
+### De-duplication — projector only
+
+5 of 19 songs repeat a stanza verbatim, and for those it removes up to 40% of the lines. It runs
+for `/live` and **not** for the deck: a deck is advanced slide by slide, so a chorus sung three
+times needs three slides, and collapsing them would break the running order mid-service. Exact
+matches only after case/whitespace/punctuation folding — near-duplicates are left alone, since
+guessing there risks dropping a verse that merely rhymes with another.
+
+### Line breaking
+
+Median longest-line in the corpus is 44 characters, max 76, with 68 lines over the 42-character
+threshold. The first implementation preferred punctuation nearest the middle and produced a
+**21/53** split on a 75-character line — worse than breaking at the midpoint space. `_best_break`
+therefore tries sentence end, then clause punctuation, then any space, but **only accepts a
+candidate that leaves both halves at least 35% of the line**. On real lyrics that lands the
+break where a singer breathes:
+
+```
+Änglar sjung - er ut, he - e - lig. Hela skapel - sen sjunger he - e - lig.
+  ->  Änglar sjung - er ut, he - e - lig.        (35)
+      Hela skapel - sen sjunger he - e - lig.    (39)
+```
+
+A run with nowhere balanced to break is left long rather than mangled.
+
+### What this does not fix
+
+**Vilket underbart namn** is 42 lines even after shaping — roughly 18px on a 1080p screen. No
+amount of text shaping makes a song that long readable from the back of a room while it all
+shares one screen. The only lever that changes that ceiling without paging is a two-column
+layout above a line threshold, and it's a partial win at best: halving the column width forces
+more wrapping back.
+
 ## PowerPoint export (`pptx_export.py`)
 
 Same shape as the other two logic modules: **no Flask**, takes `SongLyrics` and returns bytes,

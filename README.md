@@ -256,6 +256,31 @@ projector goes blank rather than leaving the last song's lyrics up. If
 Planning Center becomes unreachable mid-service, the display holds its last
 frame instead of blanking, and the remote shows why.
 
+#### How lyrics are shaped for the projector
+
+Services LIVE reports which *item* is current, never which stanza, so the
+whole song shares one screen and the only lever on legibility is line count.
+Three passes buy that back, measured across five Sundays of real plans (19
+songs, 579 visual lines &rarr; **448**, 23% fewer, with no song coming out
+worse):
+
+- **Section labels are stripped** -- `VERSE 1:`, `REFRÄNG:`, `STICK:` and
+  friends are notes for the band, not something to project. A label also acts
+  as a stanza break, since they aren't reliably preceded by a blank line.
+- **Repeated stanzas are collapsed** -- a chorus printed three times only
+  steals room here. (The PowerPoint deck deliberately keeps repeats: it's
+  advanced slide by slide, so each repeat needs its own slide.)
+- **Over-long lines are broken at sensible points** -- sentence end, then
+  clause punctuation, then a space, preferring balanced halves. This costs no
+  space that wasn't already being lost; the browser was wrapping those lines
+  anyway, just wherever the edge fell.
+
+The public site (`/`) and the Notion export keep their section labels on
+purpose: those are for reading and for the band, where the structure helps.
+
+Long songs are still small -- a 42-line song lands around 18px on a 1080p
+screen -- which is inherent to showing a whole song at once.
+
 > [!NOTE]
 > The Services LIVE integration **has been exercised end-to-end against a
 > real plan** (2026-07-26): taking control, next/previous, tap-to-jump, the

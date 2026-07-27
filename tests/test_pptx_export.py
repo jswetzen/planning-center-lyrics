@@ -1,11 +1,10 @@
 """
-Tests for pptx_export.py.
+Tests for pptx_export.py -- the deck itself.
 
-Two things carry most of the risk. Stanza splitting decides how many slides
-there are and what lands on each -- get it wrong and someone finds out
-mid-service. Section-label stripping decides whether the word "Refräng" gets
-projected at a congregation, so it has to be aggressive enough to catch real
-labels and timid enough to never eat a lyric.
+Stanza splitting, label stripping and line wrapping now live in pco_client and
+are tested in tests/test_lyric_shaping.py; what's left here is what's specific
+to PowerPoint: font sizing, slide structure, and the ways a deck differs from
+the projector.
 """
 
 import io
@@ -21,11 +20,9 @@ from pptx_export import (
     build_deck_bytes,
     choose_font_size,
     footer_text,
-    looks_like_section_label,
-    split_stanzas,
     suggest_filename,
 )
-from pco_client import SongLyrics
+from pco_client import DEFAULT_WRAP_CHARS, SongLyrics
 
 
 def _song(title="Song A", lyrics="line one\nline two", ccli="1234"):
@@ -39,86 +36,6 @@ def _slide_texts(prs):
         boxes = [sh for sh in slide.shapes if sh.has_text_frame]
         out.append(boxes[0].text_frame.text if boxes else "")
     return out
-
-
-# --------------------------------------------------------------------------
-# split_stanzas
-# --------------------------------------------------------------------------
-
-
-def test_blank_line_separates_slides():
-    assert split_stanzas("a\nb\n\nc\nd") == ["a\nb", "c\nd"]
-
-
-def test_runs_of_blank_lines_do_not_make_empty_slides():
-    """A double blank line between stanzas is common in hand-entered lyrics
-    and must not project a black slide mid-song."""
-    assert split_stanzas("a\n\n\n\nb") == ["a", "b"]
-
-
-def test_windows_and_mac_line_endings():
-    assert split_stanzas("a\r\nb\r\n\r\nc") == ["a\nb", "c"]
-
-
-def test_leading_and_trailing_whitespace_is_ignored():
-    assert split_stanzas("\n\n  a  \nb\n\n\n") == ["a\nb"]
-
-
-def test_empty_lyrics_produce_no_stanzas():
-    assert split_stanzas("") == []
-    assert split_stanzas("   \n\n  ") == []
-
-
-def test_lines_of_only_whitespace_inside_a_stanza_are_dropped():
-    assert split_stanzas("a\n   \nb") == ["a", "b"]
-
-
-# --------------------------------------------------------------------------
-# Section labels
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "label",
-    ["Verse", "Verse 1", "verse 2", "[Chorus]", "Chorus:", "Bridge", "Pre-Chorus",
-     "Tag", "Intro", "Outro", "Refräng", "Refrang:", "Vers 2", "Brygga", "(Bridge)",
-     "Chorus x2", "Bridge (x2)"],
-)
-def test_recognizes_section_labels(label):
-    assert looks_like_section_label(label)
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "Bridge over troubled water",   # starts with a label word, but is a lyric
-        "Tack för Din trofasthet mot mig",
-        "I will sing",
-        "",
-        "Verse one of many things I sing",
-        "Chorus of angels singing out",
-    ],
-)
-def test_does_not_mistake_lyrics_for_labels(line):
-    assert not looks_like_section_label(line)
-
-
-def test_label_is_stripped_from_the_top_of_a_stanza():
-    assert split_stanzas("Verse 1\nsing this\nand this") == ["sing this\nand this"]
-
-
-def test_stanza_that_is_only_a_label_disappears():
-    assert split_stanzas("Chorus\n\nreal words") == ["real words"]
-
-
-def test_label_stripping_can_be_turned_off():
-    assert split_stanzas("Verse 1\nsing this", strip_labels=False) == ["Verse 1\nsing this"]
-
-
-def test_a_label_further_down_a_stanza_is_left_alone():
-    """Only the first line is a plausible label; mangling the middle of a
-    stanza would be worse than leaving a stray word in."""
-    assert split_stanzas("sing this\nBridge") == ["sing this\nBridge"]
 
 
 # --------------------------------------------------------------------------
@@ -234,3 +151,42 @@ def test_filename_strips_characters_windows_and_macos_reject():
 
 def test_filename_never_ends_up_empty():
     assert suggest_filename("///", None) == "lyrics.pptx"
+
+
+# --------------------------------------------------------------------------
+# Where a deck deliberately differs from the projector
+# --------------------------------------------------------------------------
+
+
+def test_repeated_stanzas_each_get_their_own_slide():
+    """The projector collapses repeats to buy font size; a deck must not.
+    It's advanced slide by slide, so a chorus sung three times needs three
+    slides or the running order breaks mid-service."""
+    song = _song("A", "sjung nu ut\n\nen ny sång\n\nsjung nu ut")
+    assert _slide_texts(build_deck([song])) == ["sjung nu ut", "en ny sång", "sjung nu ut"]
+
+
+def test_long_lines_are_wrapped_before_sizing():
+    """Otherwise one runaway line drives the whole slide to the font floor."""
+    long_line = "Du som är förlåten och du som blivit fri, sjung nu ut all ära till Guds lamm."
+    text = _slide_texts(build_deck([_song("A", long_line)]))[0]
+    assert "\n" in text
+    assert all(len(l) <= DEFAULT_WRAP_CHARS for l in text.split("\n"))
+
+
+def test_wrapping_raises_the_font_size_it_would_otherwise_force():
+    long_line = "Du som är förlåten och du som blivit fri, sjung nu ut all ära till Guds lamm."
+    assert choose_font_size(long_line) < choose_font_size(
+        _slide_texts(build_deck([_song("A", long_line)]))[0]
+    )
+
+
+def test_section_labels_do_not_reach_a_slide():
+    texts = _slide_texts(build_deck([_song("A", "VERSE 1:\nsing this\n\nCHORUS:\nand this")]))
+    assert texts == ["sing this", "and this"]
+
+
+def test_midblock_label_splits_into_two_slides():
+    """Previously these merged into one slide with the marker printed in the
+    middle of it."""
+    assert _slide_texts(build_deck([_song("A", "line A\nINTRO\nline B")])) == ["line A", "line B"]

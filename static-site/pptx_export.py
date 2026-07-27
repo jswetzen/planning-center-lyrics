@@ -24,7 +24,13 @@ blank-line-separated stanzas, which is exactly that unit, so the split is the
 document's own structure rather than something guessed.
 
 Section labels ("Verse 1", "Refräng") are stripped, since those are notes for
-the band and must not end up on a screen the congregation is reading.
+the band and must not end up on a screen the congregation is reading. The
+splitting, label detection and line wrapping all live in pco_client, shared
+with the live projector so both surfaces agree on what a screenful is.
+
+Repeated stanzas are deliberately **not** collapsed here, unlike on the
+projector: a deck is advanced slide by slide, so a chorus sung three times
+needs three slides.
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
-from pco_client import SongLyrics
+from pco_client import SongLyrics, split_stanzas, wrap_lines
 
 log = logging.getLogger("pptx_export")
 
@@ -67,66 +73,6 @@ THEMES = {
 DEFAULT_THEME = "dark"
 
 
-# --------------------------------------------------------------------------
-# Text shaping (pure)
-# --------------------------------------------------------------------------
-
-# Section markers the band reads and the congregation shouldn't. Swedish
-# included because that's what this account's songs are actually written in.
-_SECTION_WORDS = {
-    "verse", "chorus", "pre-chorus", "prechorus", "bridge", "tag", "intro", "outro",
-    "interlude", "instrumental", "ending", "refrain", "vamp", "turnaround", "coda",
-    "vers", "refräng", "refrang", "brygga", "stick", "omkväde", "omkvade", "slut",
-}
-
-# "Verse 2", "[Chorus]", "Refräng:", "Bridge (x2)" -- label, optional number
-# or repeat marker, optional punctuation. Anchored and length-capped so an
-# actual lyric line starting with "Bridge over troubled water" can't match.
-_SECTION_RE = re.compile(
-    r"^[\[\(]?\s*(?P<word>[A-Za-zÅÄÖåäö\-]+)\s*(?:\d+|[ivxIVX]+)?\s*(?:\(?[xX]\s*\d+\)?)?\s*[\]\):.]?\s*$"
-)
-
-
-def looks_like_section_label(line: str) -> bool:
-    """Whether a line is a structural marker rather than something to sing."""
-    stripped = line.strip()
-    if not stripped or len(stripped) > 24:
-        return False
-    match = _SECTION_RE.match(stripped)
-    if not match:
-        return False
-    return match.group("word").lower() in _SECTION_WORDS
-
-
-def split_stanzas(text: str, strip_labels: bool = True) -> list[str]:
-    """Split lyrics into one chunk per projected slide.
-
-    Blank lines separate stanzas -- Planning Center's own convention, and the
-    same thing a person sees when they look at the lyrics field. Runs of
-    several blank lines collapse rather than producing empty slides, and a
-    leading section label is dropped from each stanza (a stanza that is
-    *only* a label disappears entirely).
-    """
-    if not text or not text.strip():
-        return []
-
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    stanzas: list[str] = []
-
-    for block in re.split(r"\n\s*\n", normalized):
-        # Stripped at both ends, not just the right: slides are centre-aligned,
-        # so hand-typed leading indentation is invisible noise that only skews
-        # the longest-line measurement choose_font_size relies on.
-        lines = [line.strip() for line in block.split("\n")]
-        lines = [line for line in lines if line]
-        if strip_labels and lines and looks_like_section_label(lines[0]):
-            lines = lines[1:]
-        if lines:
-            stanzas.append("\n".join(lines))
-
-    return stanzas
-
-
 def choose_font_size(stanza: str) -> int:
     """Pick a body font size that should fit the stanza on one slide.
 
@@ -138,6 +84,9 @@ def choose_font_size(stanza: str) -> int:
 
     Both constraints are applied and the smaller wins: width (a long line must
     not run off the side) and height (many lines must not run off the bottom).
+    Callers pass text already through pco_client.wrap_lines, so the longest
+    line here is one someone chose rather than whatever the source happened to
+    contain.
     """
     lines = [line for line in stanza.split("\n") if line.strip()]
     if not lines:
@@ -226,7 +175,7 @@ def build_deck(
         # prose "_No lyrics found..._" note that reads fine in a Markdown
         # export and would be absurd projected at a congregation.
         stanzas = (
-            split_stanzas(song.plain_lyrics, strip_labels=strip_labels)
+            [wrap_lines(st) for st in split_stanzas(song.plain_lyrics, strip_labels=strip_labels)]
             if song.plain_lyrics.strip()
             else []
         )

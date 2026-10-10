@@ -190,3 +190,22 @@ def test_midblock_label_splits_into_two_slides():
     """Previously these merged into one slide with the marker printed in the
     middle of it."""
     assert _slide_texts(build_deck([_song("A", "line A\nINTRO\nline B")])) == ["line A", "line B"]
+
+
+def test_break_marker_ends_a_slide_and_never_reaches_one():
+    song = _song("A", "VERSE 1:\none\ntwo\n# ---\nthree\n#---\nfour\n# a note")
+    texts = _slide_texts(build_deck([song]))
+    assert texts == ["one\ntwo", "three", "four"]
+    assert not any("#" in t or "---" in t for t in texts)
+
+
+def test_marker_pieces_over_four_lines_are_balanced():
+    lines = "\n".join(f"line {i}" for i in range(6))
+    texts = _slide_texts(build_deck([_song("A", f"{lines}\n# ---\nlast")]))
+    assert [len(t.split("\n")) for t in texts] == [3, 3, 1]
+
+
+def test_unmarked_long_stanza_is_still_one_slide():
+    """Existing behaviour: the four-line cap only applies where a marker is."""
+    lines = "\n".join(f"line {i}" for i in range(9))
+    assert len(_slide_texts(build_deck([_song("A", lines)]))) == 1

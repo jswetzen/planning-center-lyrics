@@ -148,6 +148,13 @@ white-on-black or black-on-white, and download.
 - **One slide per stanza**, not per song -- the unit of projection is a
   screenful, and Planning Center's blank-line-separated lyrics are already
   exactly that.
+- **`# ---` forces a slide break.** A line that is only `# ---` (or `#---`,
+  two or more dashes) inside a stanza ends the slide there; a piece still over
+  four lines is cut into balanced chunks (9 lines become 3+3+3). It is the same
+  marker the worship repo's slide tool uses, invisible to musicians because
+  OnSong hides `#` lines and ChordPro drops them. A stanza with no marker is
+  left alone, however long. Every `#` line, marker included, is stripped from
+  the web lyrics page, projector, remote and Notion export.
 - **Section labels are dropped.** Real plans on this account carry
   `VERSE 1:`, `CHORUS:`, `TAG:`, `BRIDGE:` (and Swedish `Refräng`, `Vers`,
   `Brygga`) as the first line of a stanza -- notes for the band that must not

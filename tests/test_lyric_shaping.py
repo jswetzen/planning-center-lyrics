@@ -225,3 +225,99 @@ def test_a_bare_section_word_on_its_own_line_is_treated_as_a_label():
     assert looks_like_section_label("INTRO")
     # Two words is already enough to be safe.
     assert not looks_like_section_label("chorus of angels")
+
+
+# --------------------------------------------------------------------------
+# "#" comments and the "# ---" slide-break marker
+#
+# Same rule as the worship repo (tools/setpdf/build.py): a line whose stripped
+# text starts with "#" is a hidden comment; "# ---" with 2+ dashes is the
+# invisible slide-break marker, which only split_slides honours.
+# --------------------------------------------------------------------------
+
+from pco_client import (  # noqa: E402
+    SongLyrics,
+    balanced_chunks,
+    is_break_marker,
+    is_comment_line,
+    split_slides,
+    strip_comments,
+)
+
+
+@pytest.mark.parametrize("line", ["# ---", "#---", "#  ----  ", "   # --", "#\t---"])
+def test_break_marker_forms(line):
+    assert is_break_marker(line) and is_comment_line(line)
+
+
+@pytest.mark.parametrize("line", ["# -", "#-", "# --- x", "# note", "---", "word # ---", ""])
+def test_not_a_break_marker(line):
+    assert not is_break_marker(line)
+
+
+def test_any_hash_line_is_a_comment_but_a_midline_hash_is_not():
+    assert is_comment_line("  # a note")
+    assert not is_comment_line("Number #1 in my heart")
+
+
+def test_strip_comments_removes_markers_and_notes_and_leaves_text_alone():
+    assert strip_comments("a\n# ---\nb\n  # note\nc") == "a\nb\nc"
+    plain = "a\n\nb"
+    assert strip_comments(plain) == plain
+    assert strip_comments("") == ""
+
+
+def test_strip_comments_does_not_widen_a_stanza_gap():
+    assert strip_comments("a\n\n# ---\n\nb") == "a\n\nb"
+
+
+def test_body_hides_comments_in_lyrics_and_chart():
+    song = SongLyrics("S", "one\n# ---\ntwo", "[G]one\n#---\n# note\n[C]two", None)
+    assert song.body(include_chords=False) == "one\ntwo"
+    assert song.body(include_chords=True) == "[G]one\n[C]two"
+    # the raw fields keep the marker for the deck
+    assert "# ---" in song.plain_lyrics
+
+
+def test_split_stanzas_ignores_comments_and_marker():
+    assert split_stanzas("a\n# ---\nb\n# note\nc\n\nd") == ["a\nb\nc", "d"]
+    assert split_stanzas("# ---\n\n# note") == []
+
+
+def test_split_slides_without_marker_matches_split_stanzas_however_long():
+    text = "VERSE 1:\n" + "\n".join(f"line {i}" for i in range(9)) + "\n\nnext"
+    assert split_slides(text) == split_stanzas(text)
+    assert len(split_slides(text)[0].split("\n")) == 9
+
+
+def test_split_slides_cuts_at_marker():
+    assert split_slides("a\nb\n# ---\nc\nd") == ["a\nb", "c\nd"]
+
+
+def test_split_slides_marker_at_edges_or_doubled_makes_no_empty_slide():
+    assert split_slides("# ---\na\n#---\n# ---\nb\n# ---") == ["a", "b"]
+    assert split_slides("# ---") == []
+
+
+def test_split_slides_other_comments_are_not_breaks():
+    assert split_slides("a\n# note\nb") == ["a\nb"]
+
+
+def test_split_slides_balances_over_long_pieces_after_a_marker():
+    nine = [f"l{i}" for i in range(9)]
+    out = split_slides("\n".join(["x", "# ---"] + nine))
+    assert out[0] == "x"
+    assert [len(s.split("\n")) for s in out[1:]] == [3, 3, 3]
+
+
+def test_split_slides_label_and_blank_line_still_split_and_markers_do_not_leak():
+    out = split_slides("VERSE 1:\na\n# ---\nb\n\nCHORUS:\nc")
+    assert out == ["a", "b", "c"]
+    assert not any("#" in s for s in out)
+
+
+def test_balanced_chunks():
+    assert [len(c) for c in balanced_chunks(list("abcdefghi"))] == [3, 3, 3]
+    assert [len(c) for c in balanced_chunks(list("abcde"))] == [3, 2]
+    assert balanced_chunks([]) == []
+    assert balanced_chunks(["a"]) == [["a"]]

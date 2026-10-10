@@ -28,6 +28,14 @@ the band and must not end up on a screen the congregation is reading. The
 splitting, label detection and line wrapping all live in pco_client, shared
 with the live projector so both surfaces agree on what a screenful is.
 
+A `# ---` line (or `#---`, two or more dashes) inside a stanza is an invisible
+slide-break marker, the same one the worship repo's slide tool reads: OnSong
+hides `#` lines and ChordPro drops them, so it costs musicians nothing. The
+slide ends there, and a piece still over four lines is cut into balanced
+chunks. A stanza without a marker is untouched, however long; that is what
+this deck did before the marker existed. Other `#` lines are hidden comments
+and never reach a slide.
+
 Repeated stanzas are deliberately **not** collapsed here, unlike on the
 projector: a deck is advanced slide by slide, so a chorus sung three times
 needs three slides.
@@ -45,7 +53,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
-from pco_client import SongLyrics, split_stanzas, wrap_lines
+from pco_client import SongLyrics, split_slides, wrap_lines
 
 log = logging.getLogger("pptx_export")
 
@@ -163,7 +171,7 @@ def _add_slide(prs: Presentation, theme: dict, body: str, footer: str) -> None:
 def build_deck(
     songs: Iterable[SongLyrics], theme: str = DEFAULT_THEME, strip_labels: bool = True
 ) -> Presentation:
-    """Build a 16:9 deck: one slide per stanza, in plan order."""
+    """Build a 16:9 deck: one slide per stanza (or per `# ---` piece), in plan order."""
     palette = THEMES.get(theme, THEMES[DEFAULT_THEME])
 
     prs = Presentation()
@@ -175,7 +183,7 @@ def build_deck(
         # prose "_No lyrics found..._" note that reads fine in a Markdown
         # export and would be absurd projected at a congregation.
         stanzas = (
-            [wrap_lines(st) for st in split_stanzas(song.plain_lyrics, strip_labels=strip_labels)]
+            [wrap_lines(st) for st in split_slides(song.plain_lyrics, strip_labels=strip_labels)]
             if song.plain_lyrics.strip()
             else []
         )

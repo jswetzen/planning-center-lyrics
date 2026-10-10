@@ -9,6 +9,7 @@ static-site/generate_static_site.py, and experimental/remote_display.py.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -687,33 +688,81 @@ def looks_like_section_label(line: str) -> bool:
     return True
 
 
-def split_stanzas(text: str, strip_labels: bool = True) -> list[str]:
-    """Split lyrics into one chunk per projected screenful.
+# Comment lines in the OnSong/ChordPro-style charts Planning Center holds:
+# a line whose stripped text starts with "#". OnSong hides them and ChordPro
+# drops them, so musicians never see one, and neither may the congregation or
+# any rendered surface (web page, projector, remote, Notion). Mirrors the rule
+# in the worship repo's tools/setpdf/build.py, deliberately kept identical.
+#
+# One comment means something: "# ---" (or "#---", two or more dashes) on its
+# own line is an invisible slide-break marker. It is hidden everywhere like
+# any other comment, but split_slides() reads it to end a PowerPoint slide.
+_BREAK_MARK_RE = re.compile(r"^#\s*-{2,}\s*$")
 
-    Blank lines separate stanzas -- Planning Center's own convention. A
-    section label *also* starts a new stanza and is then dropped, which
-    matters because labels are not reliably preceded by a blank line: 3 of
-    86 labels in the corpus sit mid-block, and treating those as mere text
-    both left the marker on screen and merged two sections into one slide.
+# Slide-size ceiling for a chunk cut at a break marker (and the balanced
+# fallback for over-long ones), same as the worship slides tool.
+MAX_SLIDE_LINES = 4
+
+# Sentinel in a list of lyric lines: "a break marker was here".
+_BREAK = None
+
+
+def is_comment_line(line: str) -> bool:
+    """Whether a chart line is a hidden `#` comment (the break marker included)."""
+    return line.strip().startswith("#")
+
+
+def is_break_marker(line: str) -> bool:
+    """Whether a line is the invisible `# ---` slide-break marker."""
+    return bool(_BREAK_MARK_RE.match(line.strip()))
+
+
+def strip_comments(text: str) -> str:
+    """Drop every `#` comment line, break markers included.
+
+    The one place display code goes through to keep comments off screen.
+    Text without a comment comes back untouched; otherwise runs of blank
+    lines a removed comment leaves behind are collapsed to one, so a marker
+    sitting on its own between two stanzas cannot widen the gap.
+    """
+    if not text or "#" not in text:
+        return text
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not any(is_comment_line(line) for line in lines):
+        return text
+    kept = [line for line in lines if not is_comment_line(line)]
+    return re.sub(r"\n(?:[ \t]*\n){2,}", "\n\n", "\n".join(kept)).strip()
+
+
+def _parse_stanzas(text: str, strip_labels: bool) -> list[list[Optional[str]]]:
+    """Text -> stanzas of stripped lines, with _BREAK where a marker sat.
+
+    `#` comments never become lyrics. Breaks are reported rather than acted
+    on, because the projector wants them ignored and the deck wants them
+    honoured.
     """
     if not text or not text.strip():
         return []
 
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    stanzas: list[str] = []
+    stanzas: list[list[Optional[str]]] = []
 
-    def flush(buffer: list[str]) -> None:
-        if buffer:
-            stanzas.append("\n".join(buffer))
+    def flush(buffer: list[Optional[str]]) -> None:
+        if any(item is not _BREAK for item in buffer):
+            stanzas.append(buffer)
 
     for block in re.split(r"\n\s*\n", normalized):
         # Stripped both ends: slides are centre-aligned, so hand-typed
         # indentation is invisible noise that only skews the longest-line
         # measurement the font sizing depends on.
-        current: list[str] = []
+        current: list[Optional[str]] = []
         for raw_line in block.split("\n"):
             line = raw_line.strip()
             if not line:
+                continue
+            if is_comment_line(line):
+                if is_break_marker(line):
+                    current.append(_BREAK)
                 continue
             if strip_labels and looks_like_section_label(line):
                 flush(current)
@@ -723,6 +772,68 @@ def split_stanzas(text: str, strip_labels: bool = True) -> list[str]:
         flush(current)
 
     return stanzas
+
+
+def split_stanzas(text: str, strip_labels: bool = True) -> list[str]:
+    """Split lyrics into one chunk per projected screenful.
+
+    Blank lines separate stanzas -- Planning Center's own convention. A
+    section label *also* starts a new stanza and is then dropped, which
+    matters because labels are not reliably preceded by a blank line: 3 of
+    86 labels in the corpus sit mid-block, and treating those as mere text
+    both left the marker on screen and merged two sections into one slide.
+
+    `#` comment lines (and so the `# ---` break marker) are dropped and have
+    no effect on the split; see split_slides for the one consumer that
+    honours the marker.
+    """
+    return [
+        "\n".join(line for line in stanza if line is not _BREAK)
+        for stanza in _parse_stanzas(text, strip_labels)
+    ]
+
+
+def balanced_chunks(lines: list[str], limit: int = MAX_SLIDE_LINES) -> list[list[str]]:
+    """Cut into the fewest chunks of at most `limit` lines, sizes as equal
+    as possible and the longer ones first (9 lines -> 3+3+3, not 4+4+1: a
+    lone orphan line on a slide reads as a mistake from the back of the room)."""
+    if not lines:
+        return []
+    count = math.ceil(len(lines) / limit)
+    base, extra = divmod(len(lines), count)
+    out, index = [], 0
+    for n in range(count):
+        size = base + (1 if n < extra else 0)
+        out.append(lines[index:index + size])
+        index += size
+    return out
+
+
+def split_slides(
+    text: str, strip_labels: bool = True, max_lines: int = MAX_SLIDE_LINES
+) -> list[str]:
+    """Like split_stanzas, but a `# ---` marker ends the slide.
+
+    A stanza with no marker comes back exactly as split_stanzas would have
+    it, however long: the deck's rules predate the marker and are unchanged
+    for charts that don't use it. A stanza that does carry a marker is cut
+    there, and any piece still over `max_lines` lines is cut into balanced
+    chunks (the same fallbacks as the worship slides tool).
+    """
+    slides: list[str] = []
+    for stanza in _parse_stanzas(text, strip_labels):
+        if _BREAK not in stanza:
+            slides.append("\n".join(stanza))
+            continue
+        groups: list[list[str]] = [[]]
+        for line in stanza:
+            if line is _BREAK:
+                groups.append([])
+            else:
+                groups[-1].append(line)
+        for group in groups:
+            slides.extend("\n".join(chunk) for chunk in balanced_chunks(group, max_lines))
+    return slides
 
 
 def _comparison_key(stanza: str) -> str:
@@ -854,10 +965,14 @@ class SongLyrics:
         self.item_id = item_id
 
     def body(self, include_chords: bool) -> str:
+        # Every rendered surface (static site, Notion, remote, the projector's
+        # fallback) reads this, so it is where `#` comments and the "# ---"
+        # slide marker are hidden. The fields themselves stay raw: the deck
+        # needs the marker and strips it itself (split_slides).
         if include_chords and self.chord_chart.strip():
-            return self.chord_chart
+            return strip_comments(self.chord_chart)
         if self.plain_lyrics.strip():
-            return self.plain_lyrics
+            return strip_comments(self.plain_lyrics)
         # Neither field populated in Planning Center for this arrangement.
         return "_No lyrics found in Planning Center for this song/arrangement._"
 

@@ -379,6 +379,26 @@ directory is byte-identical before and after an export.
 stores lyrics as blank-line-separated stanzas, which is that unit already, so the split follows
 the document's own structure rather than guessing at one.
 
+**`# ---` is an invisible slide break.** Charts in the worship repo carry `# ---` (or `#---`, two
+or more dashes) on its own line to say "the slide ends here"; OnSong hides every line starting
+with `#` and ChordPro drops them, so musicians never see it. `pco_client.split_slides` reads it:
+a stanza containing a marker is cut there and any piece over `MAX_SLIDE_LINES` (4) lines is cut
+into balanced chunks (`balanced_chunks`: 9 lines are 3+3+3, never 4+4+1, because a lone orphan
+line reads as a mistake from the back of the room). A stanza *without* a marker is returned
+exactly as `split_stanzas` gives it, however long, so existing decks do not change. Where this
+differs from the worship tool on purpose: worship also applies the 4-line cap to unmarked
+sections, here that would silently re-slice every existing deck.
+
+The marker, and every other `#` line, is a hidden comment everywhere else. `strip_comments` is
+applied in `SongLyrics.body()` (static site, Notion, remote, projector fallback) and
+`split_stanzas` ignores `#` lines (projector), using one shared rule (`is_comment_line`: stripped
+text starts with `#`; `is_break_marker`: `#`, optional spaces, 2+ dashes) that mirrors worship's
+`tools/setpdf/build.py`. The raw `plain_lyrics`/`chord_chart` fields keep the `#` lines so the
+deck can see the marker. **Unverified:** whether Planning Center keeps `#` lines in its `lyrics`
+field (the one the deck splits) and in `chord_chart`; no fixture or recorded response in this
+repo contains one, and the real API was not called. If PCO drops them from `lyrics`, the deck
+simply falls back to one slide per stanza.
+
 **Section labels are stripped**, and this is not cosmetic: real songs on this account start
 stanzas with `VERSE 1:`, `CHORUS:`, `TAG:`, `BRIDGE:`. Those are notes for the band, and
 projecting them at a congregation is a visible mistake. `looks_like_section_label` is
